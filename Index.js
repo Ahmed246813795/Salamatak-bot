@@ -1,7 +1,7 @@
 /**
- * بوت واتساب السحابي التفاعلي المتكامل
+ * بوت واتساب الاحترافي بالأزرار والقوائم التفاعلية الحقيقية (Native Interactive Buttons & Lists)
  * عيادة سلامتك لطب الفم وتجميل الأسنان — د. أحمد سلامة أبوالفتوح
- * يعمل 24 ساعة على منصة Render ويرسل ملخص الحجوزات تلقائياً لواتساب الدكتور
+ * ميزة خاصة: إخفاء وأرشفة الخطوات التمهيدية تلقائياً وإظهار رسالة الحجز النهائية فقط على هاتف الدكتور
  */
 
 const express = require('express');
@@ -12,17 +12,17 @@ const {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
-   getAggregateVotesInPollMessage
+  generateWAMessageFromContent,
+  proto
 } = require('@whiskeysockets/baileys');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// رقم واتساب العيادة لاستلام ملخص الحجوزات تلقائياً
+// رقم واتساب الدكتور لاستلام الرسالة النهائية للحجز فقط
 const DOCTOR_NUMBER = '201559004796';
 const DOCTOR_JID = `${DOCTOR_NUMBER}@s.whatsapp.net`;
 
-// بيانات العيادة الثابتة
 const CLINIC_INFO = {
   name: 'عيادة سلامتك لطب الفم وتجميل الأسنان',
   doctor: 'د. أحمد سلامة أبوالفتوح',
@@ -34,7 +34,6 @@ const CLINIC_INFO = {
   hours: 'جميع أيام الأسبوع ما عدا الجمعة — من الساعة 3:00 عصراً حتى 10:00 مساءً'
 };
 
-// قائمة خدمات العيادة الـ 12 بالتفصيل الكامل
 const SERVICES_DATA = [
   {
     num: '1',
@@ -98,186 +97,276 @@ const SERVICES_DATA = [
   }
 ];
 
-// تخزين حالة كل مريض في الذاكرة
 const userSessions = new Map();
-const pollMessagesStore = new Map();
-
 let sock = null;
 let latestQrDataUrl = null;
 let connectionStatus = 'جاري تهيئة البوت...';
-let pairingCodeValue = null;
 
-// دالة إرسال رسالة نصية مع قائمة اختيارات واضحة + تصويت تفاعلي (Poll) قابل للضغط داخل واتساب
-async function sendInteractiveMenu(jid, text, options = [], pollTitle = 'اضغط على اختيارك أو اكتب رقمه:') {
-  let fullText = text;
-  if (options.length > 0) {
-    fullText += `\n\n👇 *اختر بكتابة الرقم في الشات (أو اضغط على المربع التفاعلي بالأسفل):*\n`;
-    options.forEach((opt, idx) => {
-      fullText += `*${idx + 1}.* ${opt}\n`;
-    });
-    fullText += `\n*(لرجوع القائمة الرئيسية في أي وقت اكتب 0)*`;
+/**
+ * دالة إرسال أزرار احترافية حقيقية (Quick Reply Buttons & Single Select Menu)
+ * مع إخفاء وأرشفة المحادثات التمهيدية من شاشة الدكتور حتى لا يظهر إلا الحجز النهائي
+ */
+async function sendInteractiveMenu(jid, text, options = [], buttonTitle = '📋 اضغط هنا للاختيار', lastIncomingMsg = null) {
+  if (!options || options.length === 0) {
+    await sock.sendMessage(jid, { text });
+    if (lastIncomingMsg) {
+      await silenceIntermediateChat(jid, lastIncomingMsg);
+    }
+    return;
   }
 
-  await sock.sendMessage(jid, { text: fullText });
-
-  // إرسال مربع تصويت تفاعلي (WhatsApp Native Poll) حتى يضغط المريض بصباعه مباشرة داخل الشات (بحد أقصى 12 خيار)
-  if (options.length >= 2 && options.length <= 12) {
-    try {
-      const sentPoll = await sock.sendMessage(jid, {
-        poll: {
-          name: `🔘 ${pollTitle}`,
-          values: options,
-          selectableCount: 1
-        }
-      });
-      if (sentPoll && sentPoll.key && sentPoll.key.id) {
-        pollMessagesStore.set(sentPoll.key.id, sentPoll.message);
+  let buttons = [];
+  if (options.length <= 3) {
+    buttons = options.map((opt, idx) => ({
+      name: 'quick_reply',
+      buttonParamsJson: JSON.stringify({
+        display_text: opt.substring(0, 24),
+        id: `${idx + 1}`
+      })
+    }));
+  } else {
+    buttons = [
+      {
+        name: 'single_select',
+        buttonParamsJson: JSON.stringify({
+          title: buttonTitle,
+          sections: [
+            {
+              title: 'عيادة سلامتك — اختر بلمسة واحدة',
+              rows: options.map((opt, idx) => ({
+                header: '',
+                title: opt.substring(0, 24),
+                description: opt.length > 24 ? opt.substring(0, 70) : '',
+                id: `${idx + 1}`
+              }))
+            }
+          ]
+        })
       }
-    } catch (e) {
-      // في حالة عدم دعم المريض للتصويت يكتفي بالأرقام
-    }
+    ];
+  }
+
+  try {
+    const interactiveMsg = generateWAMessageFromContent(
+      jid,
+      {
+        viewOnceMessage: {
+          message: {
+            messageContextInfo: {
+              deviceListMetadata: {},
+              deviceListMetadataVersion: 2
+            },
+            interactiveMessage: proto.Message.InteractiveMessage.create({
+              body: proto.Message.InteractiveMessage.Body.create({ text }),
+              footer: proto.Message.InteractiveMessage.Footer.create({
+                text: 'عيادة سلامتك لطب وتجميل الأسنان — د. أحمد سلامة'
+              }),
+              header: proto.Message.InteractiveMessage.Header.create({
+                title: '',
+                hasMediaAttachment: false
+              }),
+              nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
+                buttons,
+                messageParamsJson: ''
+              })
+            })
+          }
+        }
+      },
+      {}
+    );
+
+    await sock.relayMessage(jid, interactiveMsg.message, {
+      messageId: interactiveMsg.key.id,
+      additionalNodes: [
+        {
+          tag: 'biz',
+          attrs: {},
+          content: [
+            {
+              tag: 'interactive',
+              attrs: { type: 'native_flow', v: '1' },
+              content: [
+                {
+                  tag: 'native_flow',
+                  attrs: { v: '9', name: 'mixed' }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    });
+  } catch (err) {
+    console.error('Interactive message fallback:', err.message);
+    await sock.sendMessage(jid, { text });
+  }
+
+  if (lastIncomingMsg) {
+    await silenceIntermediateChat(jid, lastIncomingMsg);
   }
 }
 
-// دالة القائمة الرئيسية
-async function sendWelcomeMenu(jid) {
+/**
+ * كتم وأرشفة المحادثات التمهيدية تلقائياً على موبايل الدكتور
+ * بحيث لا يرن الهاتف ولا تظهر المحادثة في الشاشة الرئيسية إلا عند اكتمال الحجز النهائي
+ */
+async function silenceIntermediateChat(jid, lastMsg) {
+  try {
+    if (lastMsg && lastMsg.key) {
+      await sock.readMessages([lastMsg.key]);
+    }
+    if (jid !== DOCTOR_JID && lastMsg) {
+      await sock.chatModify(
+        { archive: true, lastMessages: [lastMsg] },
+        jid
+      );
+    }
+  } catch (e) {
+    // تجاهل أي خطأ في الأرشفة الصامتة
+  }
+}
+
+async function sendWelcomeMenu(jid, lastMsg = null) {
   const session = { mode: 'MAIN_MENU', step: 0, bookingData: {} };
   userSessions.set(jid, session);
 
-  const welcomeMsg = `أهلاً وسهلاً بحضرتك في *${CLINIC_INFO.name}* 🦷✨\nمعاك المساعد الذكي لعيادة *${CLINIC_INFO.doctor}*\n(${CLINIC_INFO.title}) 👨‍⚕️\n\nفي عيادة سلامتك، راحتك وأمانتك ووقتك هما رقم واحد:\n✅ *الكشف بتدفعه أول مرة فقط!* وأي استشارات أو متابعات أو جلسات علاج بعد كده بدون أي رسوم كشف جديدة.\n✅ *أشعة ديجيتال فورية (Sensor & Portable)* وأنت قاعد مستريح على الكرسي.\n✅ *شرح كامل لخطة علاجك قبل البدء* + متاح *تقسيط تكلفة العلاج على الجلسات* (كاش أو فودافون كاش أو إنستا باي).`;
+  const welcomeMsg = `أهلاً وسهلاً بحضرتك في *${CLINIC_INFO.name}* 🦷✨\nمعاك المساعد الذكي لعيادة *${CLINIC_INFO.doctor}*\n(${CLINIC_INFO.title}) 👨‍⚕️\n\nفي عيادة سلامتك، راحتك وأمانتك ووقتك هما رقم واحد:\n✅ *الكشف بتدفعه أول مرة فقط!* وأي استشارات أو متابعات أو جلسات علاج بعد كده بدون أي رسوم كشف جديدة.\n✅ *أشعة ديجيتال فورية (Sensor & Portable)* وأنت قاعد مستريح على الكرسي.\n✅ *شرح كامل لخطة علاجك قبل البدء* + متاح *تقسيط تكلفة العلاج على الجلسات* (كاش أو فودافون كاش أو إنستا باي).\n\nاضغط على الزر بالأسفل لاختيار الخدمة المطلوبة 👇`;
 
   const mainOptions = [
-    '📅 حجز موعد أو استشارة (خطوة بخطوة)',
-    '🚨 حالات الطوارئ والحوادث (ورم شديد / صدمات الأسنان)',
-    '🦷 خدمات العيادة (كل خدمة شاملة إيه؟)',
-    '💳 حشو العصب وتقسيط الجلسات والدفع',
-    '✨ ليه تختار عيادة سلامتك؟ (أجهزتنا ومميزاتنا)',
-    '🤝 عهد الأمانة من د. أحمد (طمن قلبك)',
-    '🪥 تعليمات بعد العلاج ونصائح غسيل الأسنان',
-    '📍 العنوان، المواعيد، اللوكيشن، وفيسبوك'
+    '📅 حجز موعد أو استشارة',
+    '🚨 حالات الطوارئ والحوادث',
+    '🦷 خدمات العيادة (12 خدمة)',
+    '💳 حشو العصب وتقسيط الدفع',
+    '✨ ليه تختار عيادة سلامتك؟',
+    '🤝 عهد الأمانة من د. أحمد',
+    '🪥 تعليمات بعد العلاج والغسيل',
+    '📍 العنوان والمواعيد واللوكيشن'
   ];
 
-  await sendInteractiveMenu(jid, welcomeMsg, mainOptions, 'اختر الخدمة المطلوبة بضغطة واحدة:');
+  await sendInteractiveMenu(jid, welcomeMsg, mainOptions, '📋 القائمة الرئيسية للعيادة', lastMsg);
 }
 
-// معالجة رد المريض (سواء كتب الرقم أو النص أو ضغط على مربع التصويت التفاعلي)
-async function handlePatientInput(jid, rawInput) {
+async function handlePatientInput(jid, rawInput, lastMsg = null) {
   const input = (rawInput || '').trim();
   if (!input) return;
 
-  // إذا كتب 0 أو "قائمة" أو "بداية" أو "السلام عليكم" يعود للقائمة الرئيسية
-  if (input === '0' || input === 'القائمة' || input === 'قائمة' || input.includes('الرئيسية')) {
-    await sendWelcomeMenu(jid);
+  if (input === '0' || input.includes('القائمة الرئيسية') || input === 'قائمة') {
+    await sendWelcomeMenu(jid, lastMsg);
     return;
   }
 
   let session = userSessions.get(jid);
   if (!session) {
-    await sendWelcomeMenu(jid);
+    await sendWelcomeMenu(jid, lastMsg);
     return;
   }
 
   // ==================== 1. القائمة الرئيسية ====================
   if (session.mode === 'MAIN_MENU') {
     if (input === '1' || input.includes('حجز موعد')) {
-      await startBookingFlow(jid);
+      await startBookingFlow(jid, lastMsg);
     } else if (input === '2' || input.includes('حالات الطوارئ')) {
       session.mode = 'EMERGENCY_MENU';
       await sendInteractiveMenu(
         jid,
-        `🚨 *قسم حالات الطوارئ والحوادث (إرشادات طبية عاجلة)*\n\nده قسم مخصص لحالات الطوارئ عشان تعرف تتصرف صح فوراً وبأسرع وقت.`,
+        `🚨 *قسم حالات الطوارئ والحوادث (إرشادات طبية عاجلة)*\n\nده قسم مخصص لحالات الطوارئ عشان تعرف تتصرف صح فوراً وبأسرع وقت.\n\nاضغط على الحالة اللي عندك دلوقتي 👇`,
         [
-          '⚠️ طوارئ الورم الشديد أو صعوبة التنفس والبلع',
-          '🦷 طوارئ الحوادث والصدمات (سنة اتخلعت أو اتكسرت)',
+          '⚠️ ورم شديد أو صعوبة تنفس',
+          '🦷 حوادث وصدمات الأسنان',
           '🏠 القائمة الرئيسية'
         ],
-        'اختر نوع حالة الطوارئ:'
+        '🚨 اختر حالة الطوارئ',
+        lastMsg
       );
     } else if (input === '3' || input.includes('خدمات العيادة')) {
       session.mode = 'SERVICES_MENU';
       const srvTitles = SERVICES_DATA.map(s => s.shortTitle);
       await sendInteractiveMenu(
         jid,
-        `🦷 *قائمة خدمات عيادة سلامتك (12 خدمة متكاملة)*\n\nإحنا في عيادة سلامتك بنحب المريض يكون فاهم كل خطوة هياخدها في علاجه عشان يطمن على صحته وعلى فلوسه.`,
+        `🦷 *قائمة خدمات عيادة سلامتك (12 خدمة متكاملة)*\n\nإحنا في عيادة سلامتك بنحب المريض يكون فاهم كل خطوة هياخدها في علاجه عشان يطمن على صحته وعلى فلوسه.\n\nاضغط على الزر بالأسفل لاختيار الخدمة ومعرفة كل ما تشمله 👇`,
         srvTitles,
-        'اختر الخدمة لمعرفة كل ما تشمله:'
+        '🦷 اختر الخدمة لعرض تفاصيلها',
+        lastMsg
       );
-    } else if (input === '4' || input.includes('حشو العصب وتقسيط')) {
+    } else if (input === '4' || input.includes('حشو العصب')) {
       const msg = `💳 *سؤال مهم: ليه حشو العصب بياخد خطوات كتير؟ وإزاي بنسهل عليك دفعه؟*\n\nناس كتير بتفتكر إن حشو العصب مجرد حشوة عادية وتستغلى تمنه، لكن الحقيقة إن *حشو العصب هو عملية إنقاذ كاملة للضرس بدل خلعه*، وفي عيادة سلامتك بيكون *شامل 7 حاجات كاملة* بدون ما تدفع جنيه زيادة:\n\n1️⃣ *أشعة ديجيتال وسنسور* قبل وأثناء وبعد الحشو.\n2️⃣ *التخدير الموضعي الكامل* بدون ألم.\n3️⃣ *إزالة التسوس بالكامل* وتنظيف الضرس.\n4️⃣ *سحب العصب وتطهير الجذور* بأحدث أجهزة الروتاري.\n5️⃣ *حشو القنوات العصبية* بالكامل.\n6️⃣ *تركيب الدعامة (الوتد)* جوه الضرس لتقويته وحمايته من الكسر.\n7️⃣ *الحشو الدائم النهائي* فوق الضرس + شرح طريقة الحفاظ عليه.\n\n🌟 *طب لو مش معايا التكلفة كاملة دلوقتي؟ اطمن خالص!*\n✅ *تقسيم الدفع على الجلسات:* الشغل بيتعمل على جلسات، وتقدر تدفع جزء في كل جلسة على قد ظروفك بدون أي ضغط.\n✅ *مفيش كشف تاني:* بتدفع الكشف في أول زيارة بس، وفي باقي الجلسات بتدفع حساب الشغل فقط!\n✅ *طرق دفع مرنة:* متاح الدفع *كاش* في العيادة أو عن طريق *فودافون كاش (Vodafone Cash)* أو *إنستا باي (InstaPay)*.`;
-      await sendInteractiveMenu(jid, msg, ['📅 حجز موعد الآن', '🏠 القائمة الرئيسية']);
+      await sendInteractiveMenu(jid, msg, ['📅 حجز موعد الآن', '🏠 القائمة الرئيسية'], 'اختر', lastMsg);
     } else if (input === '5' || input.includes('ليه تختار')) {
       const msg = `✨ *ليه المرضى في عزبة السوق وبنها بيطمنوا في عيادة سلامتك؟*\n\n1️⃣ *أشعة ديجيتال وسنسور فوري (Portable X-Ray):*\nبنصور الضرس وأنت قاعد على الكرسي في ثانية من غير ما تقوم أو تتحرك، وتشوف صورة ضرسك بنفسك على الشاشة.\n\n2️⃣ *جلسة خطة علاج وتشخيص قبل ما نبدأ:*\nدكتور أحمد سلامة بيقعد معاك يشرح لك حالة أسنانك بالكامل، وإيه خطة العلاج المناسبة ليك قبل ما نلمس أي ضرس.\n\n3️⃣ *جلسة تعليم غسيل الأسنان والعناية بعد العلاج:*\nبعد ما نخلص علاجك، الدكتور بيعلمك عملياً إزاي تحافظ على الشغل اللي اتعمل وإزاي تغسل أسنانك صح عشان متحتاجش لدكتور تاني.\n\n4️⃣ *الكشف مرة واحدة فقط:*\nبتدفع الكشف أول زيارة بس، وبعدها كل جلسات العلاج والاستشارات والمتابعات مجانية بدون كشف جديد.\n\n5️⃣ *أعلى درجات التعقيم وبدون ألم:*\nأدواتك بتخرج من كيس التعقيم قدام عينك، وبنستخدم جل مخدر قبل شكة البنج وخامات أصلية حديثة.`;
-      await sendInteractiveMenu(jid, msg, ['📅 حجز موعد الآن', '🏠 القائمة الرئيسية']);
+      await sendInteractiveMenu(jid, msg, ['📅 حجز موعد الآن', '🏠 القائمة الرئيسية'], 'اختر', lastMsg);
     } else if (input === '6' || input.includes('عهد الأمانة')) {
       const msg = `🤝 *كلمة شرف وعهد من د. أحمد سلامة أبوالفتوح لكل مريض:*\n\n🦷 *1. الحفاظ على الضرس الطبيعي (مفيش استعجال ولا استسهال للخلع):*\nمستحيل نخلع ضرس طالما فيه أمل ولو بسيط إنه يتعالج ويعيش معاك، لأن مفيش زي خلقة ربنا.\n\n💰 *2. خدمة طبية محترمة تناسب الفلوس اللي بتدفعها:*\nإحنا بنقدم لك خدمة طبية محترمة وأمينة تستاهل الفلوس اللي بتدفعها؛ بنشتغل بخامات أصلية وأجهزة حديثة عشان الشغل يعيش معاك وميتعادش، وبنقولك بصراحة إيه الضروري دلوقتي وإيه اللي ممكن يتأجل.\n\n💳 *3. تيسير في الدفع وتقسيط على الجلسات:*\nلو الشغل محتاج جلسات (زي حشو العصب أو التركيبات) ومش معاك التكلفة كاملة، بتدفع جزء مريح في كل جلسة (كاش أو فودافون كاش أو إنستا باي).\n\n💉 *4. راحتك النفسية فوق كل شيء:*\nمبنشتغلش غير لما البنج يشتغل 100% وتكون مطمن ومستريح تماماً.`;
-      await sendInteractiveMenu(jid, msg, ['📅 حجز موعد الآن', '🏠 القائمة الرئيسية']);
-    } else if (input === '7' || input.includes('تعليمات بعد العلاج')) {
+      await sendInteractiveMenu(jid, msg, ['📅 حجز موعد الآن', '🏠 القائمة الرئيسية'], 'اختر', lastMsg);
+    } else if (input === '7' || input.includes('تعليمات')) {
       session.mode = 'AFTERCARE_MENU';
       await sendInteractiveMenu(
         jid,
-        `🪥 *تعليمات د. أحمد سلامة للعناية بأسنانك بعد العلاج*`,
+        `🪥 *تعليمات د. أحمد سلامة للعناية بأسنانك بعد العلاج*\n\nاختر التعليمات المطلوبة من الزر بالأسفل 👇`,
         [
-          '🩹 تعليمات ما بعد الخلع والجراحة',
-          '🦷 تعليمات ما بعد حشو العصب والحشو العادي',
-          '👑 تعليمات الحفاظ على الطرابيش والأطقم المتحركة',
-          '🪥 الطريقة الصحيحة لغسيل الأسنان يومياً',
+          '🩹 تعليمات بعد الخلع والجراحة',
+          '🦷 تعليمات بعد حشو العصب',
+          '👑 تعليمات الطرابيش والأطقم',
+          '🪥 الطريقة الصحيحة لغسيل الأسنان',
           '🏠 القائمة الرئيسية'
         ],
-        'اختر التعليمات المطلوبة:'
+        '🪥 اختر التعليمات المطلوبة',
+        lastMsg
       );
     } else if (input === '8' || input.includes('العنوان')) {
       const msg = `📍 *عنوان ومواعيد عيادة سلامتك لطب الفم وتجميل الأسنان*\n\n👨‍⚕️ *الطبيب المعالج:*\n${CLINIC_INFO.doctor}\n(${CLINIC_INFO.title})\n\n🏢 *العنوان بالتفصيل:*\n${CLINIC_INFO.address}\n\n🗺️ *موقع العيادة على خرائط جوجل (Google Maps):*\n${CLINIC_INFO.mapsUrl}\n\n📘 *صفحتنا الرسمية على فيسبوك:*\n${CLINIC_INFO.fbUrl}\n\n🕒 *مواعيد العمل:*\n${CLINIC_INFO.hours}\n\n📞 *رقم الهاتف والواتساب:*\n*${CLINIC_INFO.phone}*`;
-      await sendInteractiveMenu(jid, msg, ['📅 حجز موعد الآن', '🏠 القائمة الرئيسية']);
+      await sendInteractiveMenu(jid, msg, ['📅 حجز موعد الآن', '🏠 القائمة الرئيسية'], 'اختر', lastMsg);
     } else {
-      await sendWelcomeMenu(jid);
+      await sendWelcomeMenu(jid, lastMsg);
     }
     return;
   }
 
   // ==================== 2. قسم الطوارئ ====================
   if (session.mode === 'EMERGENCY_MENU') {
-    if (input === '1' || input.includes('الورم الشديد')) {
+    if (input === '1' || input.includes('ورم شديد')) {
       const msg = `⚠️ *طوارئ التورم الشديد وصعوبة التنفس (انتبه جيداً!):*\n\n1️⃣ *ورم شديد منتشر في الوجه مع سخونة واحمرار:*\nلو عندك ورم شديد بينتشر في جميع أنحاء الوجه مع سخونة واحمرار في الجلد، *لازم تتوجه فوراً إلى قسم الطوارئ في أقرب مستشفى* لأخذ الرعاية الطبية العاجلة.\n\n2️⃣ *تورم أسفل الحلق وعدم القدرة على التنفس (Ludwig's Angina):*\nلو فيه تورم شديد في أسفل الفك والحلق ومسبب ضيق أو انسداد في مجرى الهواء والمريض مش قادر ياخد نفسه أو يبلع، *دي حالة طوارئ قصوى ولازم التوجه فوراً لأقرب مستشفى* لتأمين مجرى التنفس فوراً.`;
       session.mode = 'MAIN_MENU';
-      await sendInteractiveMenu(jid, msg, ['📅 حجز موعد بالعيادة', '🏠 القائمة الرئيسية']);
-    } else if (input === '2' || input.includes('الحوادث والصدمات')) {
+      await sendInteractiveMenu(jid, msg, ['📅 حجز موعد بالعيادة', '🏠 القائمة الرئيسية'], 'اختر', lastMsg);
+    } else if (input === '2' || input.includes('حوادث')) {
       session.mode = 'TRAUMA_MENU';
       await sendInteractiveMenu(
         jid,
-        `🦷 *حالات التروما والصدمات (وقوع أو كسر سنة بسبب خبطة أو حادثة):*\n\nالتصرف الصح بيختلف تماماً حسب هل السنة دي *سنة لبنية (لطفل)* ولا *سنة دائمة*!`,
+        `🦷 *حالات التروما والصدمات (وقوع أو كسر سنة بسبب خبطة أو حادثة):*\n\nالتصرف الصح بيختلف تماماً حسب هل السنة دي *سنة لبنية (لطفل)* ولا *سنة دائمة*!\n\nاضغط على نوع السنة من الأزرار بالأسفل 👇`,
         [
-          '🧒 لو سنة لبنية (أطفال)',
-          '🦷 لو سنة دائمة (كبار أو أطفال كبار)',
+          '🧒 سنة لبنية (أطفال)',
+          '🦷 سنة دائمة (كبار/أطفال)',
           '🏠 القائمة الرئيسية'
         ],
-        'اختر نوع السنة المصابة:'
+        'اختر نوع السنة المصابة',
+        lastMsg
       );
     } else {
-      await sendWelcomeMenu(jid);
+      await sendWelcomeMenu(jid, lastMsg);
     }
     return;
   }
 
   if (session.mode === 'TRAUMA_MENU') {
     session.mode = 'MAIN_MENU';
-    if (input === '1' || input.includes('سنة لبنية')) {
+    if (input === '1' || input.includes('لبنية')) {
       const msg = `🧒 *إسعافات وقوع أو صدمات السنة اللبنية (عند الأطفال):*\n\n✅ *مترجعش السنة مكانها:* لو السنة اللي وقعت دي سنة لبنية، بنسبة كبيرة جداً السنة دي مبترجعش مكانها تاني عشان منأذيش الضرس الدائم اللي تحتها.\n✅ *مش لازم تحتفظ بيها:* المريض مش لازم يحتفظ بالسنة اللبنية اللي وقعت، يرميها عادي.\n✅ *أهم خطوة:* التوجه للعيادة في أقرب وقت عشان دكتور أحمد يفحص الطفل ويطمن على اللثة وباقي الأسنان.`;
-      await sendInteractiveMenu(jid, msg, ['📅 حجز موعد الآن', '🏠 القائمة الرئيسية']);
+      await sendInteractiveMenu(jid, msg, ['📅 حجز موعد الآن', '🏠 القائمة الرئيسية'], 'اختر', lastMsg);
     } else {
       const msg = `🦷 *إسعافات وقوع أو كسر السنة الدائمة (مهم جداً — عامل الوقت حاسم!):*\n\nلو السنة اللي اتخلعت من الخبطة *سنة دائمة*، اتبع الخطوات دي بالحرف وبأسرع ما يمكن:\n\n1️⃣ *امسك السنة صح:* امسك السنة من *الجزء الأبيض بتاعها (الطربوش / التاج)*، ومتمسكهاش أبداً من الجزء الأصفر (الروت أو الجذر) عشان نحافظ على أنسجة الجذر حية.\n\n2️⃣ *لو تقدر ترجعها مكانها:* لو تقدر تحطها في مكانها مظبوطة كان بها، وتوجه للعيادة في أقرب وقت.\n\n3️⃣ *لو مش هتقدر تحطها مكانها (طريقة الحفظ الصحيحة):*\n- لو شخص كبير أو طفل كبير وواعي: ممكن *يحطها في خده (جوه بقه بين الخد واللثة)* لأن *اللعاب* من أفضل البيئات الحافظة للأسنان المخلوعة أو المكسورة.\n- لو مفيش إمكانية يحطها في خده: *حطها فوراً في كوباية لبن* وتوجه للعيادة في أسرع وقت ممكن!\n\n⏰ *تذكر:* أهم حاجة هي *عامل الوقت*؛ كل ما المريض يتوجه للعيادة بدري وفي أسرع فرصة، كل ما نسب نجاح إنقاذ وتثبيت الحالات دي بتكون أفضل بكتير!`;
-      await sendInteractiveMenu(jid, msg, ['📅 حجز موعد الآن', '🏠 القائمة الرئيسية']);
+      await sendInteractiveMenu(jid, msg, ['📅 حجز موعد الآن', '🏠 القائمة الرئيسية'], 'اختر', lastMsg);
     }
     return;
   }
 
   // ==================== 3. قائمة الخدمات الـ 12 ====================
   if (session.mode === 'SERVICES_MENU') {
-    const foundSrv = SERVICES_DATA.find(s => s.num === input || input.includes(s.shortTitle));
+    const foundSrv = SERVICES_DATA.find(s => s.num === input || input.includes(s.shortTitle.substring(0, 15)));
     if (foundSrv) {
       session.mode = 'MAIN_MENU';
-      await sendInteractiveMenu(jid, foundSrv.details, ['📅 حجز موعد الآن', '🦷 عرض قائمة الخدمات', '🏠 القائمة الرئيسية']);
+      await sendInteractiveMenu(jid, foundSrv.details, ['📅 حجز موعد الآن', '🦷 خدمات العيادة', '🏠 القائمة الرئيسية'], 'اختر', lastMsg);
     } else {
-      await sendWelcomeMenu(jid);
+      await sendWelcomeMenu(jid, lastMsg);
     }
     return;
   }
@@ -295,17 +384,17 @@ async function handlePatientInput(jid, rawInput) {
     } else {
       text = `🪥 *الطريقة الصحيحة لغسيل الأسنان (نصيحة د. أحمد سلامة):*\n\n1️⃣ *التوقيت الأهم:* مرتين يومياً — مرة الصبح، وأهم مرة *قبل النوم مباشرة* (ومتاكلش أي حاجة بعدها غير المية).\n2️⃣ *حركة الفرشاة الصح:* حرك الفرشاة بزاوية مائلة من اللثة للسن (من فوق لتحت في الفك العلوي، ومن تحت لفوق في الفك السفلي) وبحركة دائرية لطيفة، وممنوع غسيل أو تفريش الأسنان بالعرض بقوة عشان اللثة متنزفش.\n3️⃣ *لا تنسَ الأسطح الداخلية واللسان:* نظف الضروس من جوه ومن فوق، وامسح سطح اللسان بالفرشاة عشان تقضي على أي رائحة كريهة.\n4️⃣ *نوع الفرشاة:* استخدم فرشاة ناعمة (Soft) أو متوسطة (Medium) وغير الفرشاة كل 3 شهور.`;
     }
-    await sendInteractiveMenu(jid, text, ['📅 حجز موعد أو متابعة مجانية', '🏠 القائمة الرئيسية']);
+    await sendInteractiveMenu(jid, text, ['📅 حجز موعد الآن', '🏠 القائمة الرئيسية'], 'اختر', lastMsg);
     return;
   }
 
   // ==================== 5. نظام الحجز التفاعلي (9 خطوات) ====================
   if (session.mode === 'BOOKING') {
-    await processBookingStep(jid, session, input);
+    await processBookingStep(jid, session, input, lastMsg);
   }
 }
 
-async function startBookingFlow(jid) {
+async function startBookingFlow(jid, lastMsg = null) {
   const session = {
     mode: 'BOOKING',
     step: 1,
@@ -323,11 +412,11 @@ async function startBookingFlow(jid) {
   };
   userSessions.set(jid, session);
 
-  const intro = `📅 *أهلاً بك في نظام الحجز الذكي لعيادة سلامتك*\n(د. أحمد سلامة أبوالفتوح)\n\n💡 *تذكير يطمنك:* الكشف بيتدفع أول مرة بس، وأي متابعة أو استشارة أو جلسات علاج بعد كده بدون أي رسوم كشف إضافية!\n\n*السؤال 1 من 9:*\nمن فضلك اكتب *الاسم الثلاثي للمريض* في رسالة الآن:\n*(أو اكتب 0 للعودة للقائمة الرئيسية)*`;
-  await sock.sendMessage(jid, { text: intro });
+  const intro = `📅 *أهلاً بك في نظام الحجز الذكي لعيادة سلامتك*\n(د. أحمد سلامة أبوالفتوح)\n\n💡 *تذكير يطمنك:* الكشف بيتدفع أول مرة بس، وأي متابعة أو استشارة أو جلسات علاج بعد كده بدون أي رسوم كشف إضافية!\n\n*السؤال 1 من 9:*\nمن فضلك اكتب *الاسم الثلاثي للمريض* في رسالة الآن:`;
+  await sendInteractiveMenu(jid, intro, ['🏠 إلغاء والعودة للقائمة'], 'اختر', lastMsg);
 }
 
-async function processBookingStep(jid, session, input) {
+async function processBookingStep(jid, session, input, lastMsg) {
   const step = session.step;
 
   if (step === 1) {
@@ -335,14 +424,15 @@ async function processBookingStep(jid, session, input) {
     session.step = 2;
     await sendInteractiveMenu(
       jid,
-      `تشرفنا بحضرتك يا أستاذ/ة *${input}* 🙏\n\n*السؤال 2 من 9:*\nكم *عمر المريض*؟`,
+      `تشرفنا بحضرتك يا أستاذ/ة *${input}* 🙏\n\n*السؤال 2 من 9:*\nكم *عمر المريض*؟ اضغط على الزر بالأسفل للاختيار 👇`,
       [
-        '🍼 رضيع / طفل صغير (أقل من 5 سنوات)',
+        '🍼 رضيع / طفل (أقل من 5 سنوات)',
         '🧒 طفل (5 - 12 سنة)',
         '🧑 شاب / بالغ (13 - 40 سنة)',
         '👨‍🦳 فوق 40 سنة'
       ],
-      'اختر الفئة العمرية للمريض:'
+      '🎂 اختر عمر المريض',
+      lastMsg
     );
   } else if (step === 2) {
     const ageMap = {
@@ -355,7 +445,7 @@ async function processBookingStep(jid, session, input) {
     session.step = 3;
     await sendInteractiveMenu(
       jid,
-      `تمام جداً 👍\n\n*السؤال 3 من 9:*\nحضرتك منورنا وجاي منين؟`,
+      `تمام جداً 👍\n\n*السؤال 3 من 9:*\nحضرتك منورنا وجاي منين؟ اضغط على الزر بالأسفل للاختيار 👇`,
       [
         '📍 عزبة السوق',
         '📍 قرية مجاورة لعزبة السوق (الشموت، كفر الشموت، كفر مويس، ميت عاصم، عزبة زكي، الفاروقية، عزبة نجيب، الرمالي، الميتيني، الرملة، كفر الحمام، فرسيس)',
@@ -364,7 +454,8 @@ async function processBookingStep(jid, session, input) {
         '📍 من خارج بنها (مراكز القليوبية الأخرى مثل طوخ، كفر شكر، شبين القناطر، قليوب وغيرها)',
         '📍 من خارج محافظة القليوبية (محافظة أخرى)'
       ],
-      'اختر المنطقة:'
+      '📍 اختر المنطقة',
+      lastMsg
     );
   } else if (step === 3) {
     const areaMap = {
@@ -381,13 +472,14 @@ async function processBookingStep(jid, session, input) {
       jid,
       `منورنا يا أهلنا الكرام 🌟\n\n*السؤال 4 من 9 (مهم لسلامتك ولاختيار البنج المناسب):*\nهل يعاني المريض من أي *أمراض مزمنة أو حالة صحية خاصة*؟`,
       [
-        '💚 الحمد لله سليم ولا توجد أمراض مزمنة',
+        '💚 الحمد لله سليم',
         '🩺 ضغط أو سكر',
-        '💊 باخد أدوية سيولة في الدم',
+        '💊 أدوية سيولة في الدم',
         '🤰 حامل أو مرضعة',
-        '⚠️ حساسية من أدوية معينة / أخرى'
+        '⚠️ حساسية أدوية / أخرى'
       ],
-      'اختر الحالة الصحية:'
+      '🩺 اختر الحالة الصحية',
+      lastMsg
     );
   } else if (step === 4) {
     const healthMap = {
@@ -401,18 +493,19 @@ async function processBookingStep(jid, session, input) {
     session.step = 5;
     await sendInteractiveMenu(
       jid,
-      `ألف سلامة، سجلنا ده في ملفك عشان دكتور أحمد يختار لك البنج والخطة الآمنة 100% لحالتك 👌\n\n*السؤال 5 من 9:*\nإيه *طبيعة الشكوى أو الوجع* اللي حاسس بيه دلوقتي؟ (وهل أخذت مسكن أو مضاد حيوي في آخر يومين؟)`,
+      `ألف سلامة، سجلنا ده في ملفك عشان دكتور أحمد يختار لك البنج والخطة الآمنة 100% لحالتك 👌\n\n*السؤال 5 من 9:*\nإيه *طبيعة الشكوى أو الوجع* اللي حاسس بيه دلوقتي؟`,
       [
-        '🚨 وجع شديد ومستمر بيصحيني من النوم (أخذت مسكن)',
-        '❄️ وجع مع المية الساقعة والحلويات بس',
-        '🍽️ وجع مع المضغ أو ورم في اللثة',
-        '😊 مفيش وجع (عايز كشف / تنظيف / تركيبة / تجميل)'
+        '🚨 وجع شديد يصحيني من النوم',
+        '❄️ وجع مع الساقع والحلويات',
+        '🍽️ وجع مع المضغ أو ورم',
+        '😊 بدون ألم (كشف/تنظيف/تركيبة)'
       ],
-      'اختر طبيعة الشكوى:'
+      '🦷 اختر طبيعة الشكوى',
+      lastMsg
     );
   } else if (step === 5) {
     const painMap = {
-      '1': 'وجع شديد ومستمر بيصحيني من النوم (أخذت مسكن)',
+      '1': 'وجع شديد ومستمر بيصحيني من النوم',
       '2': 'وجع مع المية الساقعة والحلويات بس',
       '3': 'وجع مع المضغ أو ورم في اللثة',
       '4': 'بدون ألم حالي (كشف / تنظيف / تركيبة / تجميل)'
@@ -423,13 +516,14 @@ async function processBookingStep(jid, session, input) {
       jid,
       `فهمتك تماماً، ودكتور أحمد هيفحص السبب بالأشعة الديجيتال وأنت على الكرسي 📸\n\n*السؤال 6 من 9 (سؤال يهم دكتور أحمد شخصياً):*\nهل رحت لدكتور أسنان قبل كده؟ وإيه *أكتر حاجة مقلقاك أو شاغلة بالك* في الزيارة دي؟`,
       [
-        '💉 خايف من الوجع أو شكة البنج',
-        '💰 عايز أعرف التكلفة والخطة كلها قبل ما نبدأ',
-        '🦷 خايف أخلع ضرس يكون لسه ينفع يتعالج',
-        '😟 عندي تجربة قديمة سيئة وخايف تتكرر',
+        '💉 خايف من الوجع أو البنج',
+        '💰 عايز أعرف التكلفة والخطة الأول',
+        '🦷 خايف أخلع ضرس ينفع يتعالج',
+        '😟 عندي تجربة قديمة سيئة',
         '😊 أول مرة أو مطمن الحمد لله'
       ],
-      'اختر أكتر حاجة شاغلة بالك:'
+      '💭 اختر أكتر حاجة شاغلة بالك',
+      lastMsg
     );
   } else if (step === 6) {
     const fearMap = {
@@ -459,12 +553,13 @@ async function processBookingStep(jid, session, input) {
     const allServicesList = SERVICES_DATA.map(s => s.shortTitle);
     await sendInteractiveMenu(
       jid,
-      `${reassure}\n\n*السؤال 7 من 9:*\nإيه *الخدمة المطلوبة أو المرغوبة* من خدمات العيادة؟`,
+      `${reassure}\n\n*السؤال 7 من 9:*\nإيه *الخدمة المطلوبة أو المرغوبة* من خدمات العيادة؟ اضغط الزر بالأسفل 👇`,
       allServicesList,
-      'اختر الخدمة المطلوبة:'
+      '🦷 اختر الخدمة المطلوبة',
+      lastMsg
     );
   } else if (step === 7) {
-    const foundSrv = SERVICES_DATA.find(s => s.num === input || input.includes(s.shortTitle));
+    const foundSrv = SERVICES_DATA.find(s => s.num === input || input.includes(s.shortTitle.substring(0, 15)));
     session.bookingData.serviceWanted = foundSrv ? foundSrv.shortTitle : input;
     session.step = 8;
 
@@ -472,12 +567,13 @@ async function processBookingStep(jid, session, input) {
       jid,
       `تم تسجيل الخدمة المطلوبة: *${session.bookingData.serviceWanted}* ✅\n\n*السؤال 8 من 9:*\nحضرتك *عرفت عيادة سلامتك عن طريق إيه*؟`,
       [
-        '📱 عن طريق السوشيال ميديا (فيسبوك وغيره)',
-        '🤝 عن طريق ترشيح أو توصية من قريب أو صاحب',
-        '🏘️ من أهل المنطقة (عزبة السوق وجيران العيادة)',
-        '✨ عرفت العيادة قدراً أو بالصدفة'
+        '📱 عن طريق السوشيال ميديا',
+        '🤝 ترشيح من قريب أو صاحب',
+        '🏘️ من أهل المنطقة',
+        '✨ قدراً أو بالصدفة'
       ],
-      'اختر طريقة معرفة العيادة:'
+      '📢 اختر طريقة معرفة العيادة',
+      lastMsg
     );
   } else if (step === 8) {
     const sourceMap = {
@@ -493,12 +589,13 @@ async function processBookingStep(jid, session, input) {
       jid,
       `ممتاز جداً 🌟\n\n*السؤال 9 والأخير:*\nإيه *اليوم والفترة المناسبة ليك* لتشريفنا في العيادة؟\n*(مواعيدنا يومياً من 3 عصراً لـ 10 مساءً ما عدا الجمعة)*`,
       [
-        '🕒 اليوم — الفترة الأولى (من 3 إلى 6 عصراً)',
-        '🌙 اليوم — الفترة المسائية (من 6 إلى 10 مساءً)',
-        '📅 غداً — الفترة الأولى (من 3 إلى 6 عصراً)',
-        '🌙 غداً — الفترة المسائية (من 6 إلى 10 مساءً)'
+        '🕒 اليوم (3 إلى 6 عصراً)',
+        '🌙 اليوم (6 إلى 10 مساءً)',
+        '📅 غداً (3 إلى 6 عصراً)',
+        '🌙 غداً (6 إلى 10 مساءً)'
       ],
-      'اختر الموعد المناسب:'
+      '🕒 اختر الموعد المناسب',
+      lastMsg
     );
   } else if (step === 9) {
     const timeMap = {
@@ -514,22 +611,27 @@ async function processBookingStep(jid, session, input) {
     const d = session.bookingData;
     const patientNumber = jid.split('@')[0];
 
-    const summaryForPatient = `✅ *تم تسجيل حجزك المبدئي في عيادة سلامتك بنجاح!*\n\n📋 *ملخص بيانات الحجز:*\n• *الاسم:* ${d.name}\n• *العمر:* ${d.age}\n• *المنطقة:* ${d.area}\n• *الحالة الصحية:* ${d.health}\n• *طبيعة الشكوى والألم:* ${d.painLevel}\n• *أهم ما يشغل بال المريض:* ${d.prevVisitAndFear}\n• *الخدمة المطلوبة:* ${d.serviceWanted}\n• *طريقة معرفة العيادة:* ${d.source}\n• *الموعد المفضل:* ${d.preferredTime}\n\n📸 *ملاحظة:* لو معاك أشعة قديمة أو حابب تبعت صورة للضرس، تقدر تبعتها في الشات دلوقتي.\n💳 *تذكير:* الكشف يُدفع أول مرة فقط، ومتاح الدفع كاش أو فودافون كاش أو إنستا باي.\n📍 *العنوان:* ${CLINIC_INFO.address}\n🗺️ *اللوكيشن:* ${CLINIC_INFO.mapsUrl}`;
+    const summaryForPatient = `✅ *تم تسجيل حجزك النهائي في عيادة سلامتك بنجاح!*\n\n📋 *ملخص بيانات الحجز:*\n• *الاسم:* ${d.name}\n• *العمر:* ${d.age}\n• *المنطقة:* ${d.area}\n• *الحالة الصحية:* ${d.health}\n• *طبيعة الشكوى والألم:* ${d.painLevel}\n• *أهم ما يشغل بال المريض:* ${d.prevVisitAndFear}\n• *الخدمة المطلوبة:* ${d.serviceWanted}\n• *طريقة معرفة العيادة:* ${d.source}\n• *الموعد المفضل:* ${d.preferredTime}\n\n📸 *ملاحظة:* لو معاك أشعة قديمة أو حابب تبعت صورة للضرس، تقدر تبعتها في الشات دلوقتي.\n💳 *تذكير:* الكشف يُدفع أول مرة فقط، ومتاح الدفع كاش أو فودافون كاش أو إنستا باي.\n📍 *العنوان:* ${CLINIC_INFO.address}\n🗺️ *اللوكيشن:* ${CLINIC_INFO.mapsUrl}`;
 
-    await sendInteractiveMenu(jid, summaryForPatient, ['🏠 العودة للقائمة الرئيسية']);
+    await sendInteractiveMenu(jid, summaryForPatient, ['🏠 القائمة الرئيسية'], 'اختر', null);
 
-    // إرسال ملخص الحجز الكامل تلقائياً لواتساب دكتور أحمد سلامة لدراسة الحالة قبل مجيئها
-    const doctorSummary = `🔔 *حجز مريض جديد من بوت عيادة سلامتك!*\n━━━━━━━━━━━━━━━\n👤 *اسم المريض:* ${d.name}\n📱 *رقم واتساب المريض:* +${patientNumber}\n🎂 *العمر:* ${d.age}\n📍 *المنطقة:* ${d.area}\n🩺 *الحالة الصحية:* ${d.health}\n🚨 *طبيعة الشكوى والألم:* ${d.painLevel}\n💭 *ما يقلق المريض:* ${d.prevVisitAndFear}\n🦷 *الخدمة المطلوبة:* ${d.serviceWanted}\n📢 *عرف العيادة عن طريق:* ${d.source}\n🕒 *الموعد المطلوب:* ${d.preferredTime}\n━━━━━━━━━━━━━━━\n💬 للتواصل المباشر مع المريض اضغط على رقمه: https://wa.me/${patientNumber}`;
+    // إظهار المحادثة وإرسال الرسالة النهائية فقط لهاتف الدكتور
+    try {
+      if (lastMsg) {
+        await sock.chatModify({ archive: false, lastMessages: [lastMsg] }, jid);
+      }
+    } catch (e) {}
+
+    const doctorSummary = `🔔 *رسالة حجز نهائي جديدة — عيادة سلامتك*\n━━━━━━━━━━━━━━━\n👤 *اسم المريض:* ${d.name}\n📱 *رقم واتساب المريض:* +${patientNumber}\n🎂 *العمر:* ${d.age}\n📍 *المنطقة:* ${d.area}\n🩺 *الحالة الصحية:* ${d.health}\n🚨 *طبيعة الشكوى والألم:* ${d.painLevel}\n💭 *ما يقلق المريض:* ${d.prevVisitAndFear}\n🦷 *الخدمة المطلوبة:* ${d.serviceWanted}\n📢 *عرف العيادة عن طريق:* ${d.source}\n🕒 *الموعد المطلوب:* ${d.preferredTime}\n━━━━━━━━━━━━━━━\n💬 للتواصل المباشر مع المريض: https://wa.me/${patientNumber}`;
 
     try {
       await sock.sendMessage(DOCTOR_JID, { text: doctorSummary });
     } catch (err) {
-      console.error('Error sending summary to doctor:', err.message);
+      console.error('Error sending final summary to doctor:', err.message);
     }
   }
 }
 
-// تشغيل اتصال واتساب Baileys
 async function startWhatsAppBot() {
   const { state, saveCreds } = await useMultiFileAuthState('./auth_info_baileys');
   const { version } = await fetchLatestBaileysVersion();
@@ -537,39 +639,43 @@ async function startWhatsAppBot() {
   sock = makeWASocket({
     version,
     logger: pino({ level: 'silent' }),
-    printQRInTerminal: true,
+    printQRInTerminal: false,
     auth: state,
-    browser: ['Salamtak Clinic Bot', 'Chrome', '1.0.0']
+    browser: ['Ubuntu', 'Chrome', '20.0.04']
   });
+
+  if (!state.creds.registered) {
+    setTimeout(async () => {
+      try {
+        const pairingCode = await sock.requestPairingCode(DOCTOR_NUMBER);
+        console.log('\n==================================================');
+        console.log(`🔑 كود الربط بالهاتف: ${pairingCode}`);
+        console.log('==================================================\n');
+        connectionStatus = `🔑 كود الربط الخاص بك: ${pairingCode}`;
+      } catch (err) {}
+    }, 4000);
+  }
 
   sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
-
     if (qr) {
       latestQrDataUrl = await QRCode.toDataURL(qr);
-      connectionStatus = 'بانتظار مسح رمز QR من تطبيق واتساب في موبايلك (الأجهزة المرتبطة)...';
     }
-
     if (connection === 'close') {
       const shouldReconnect =
         lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      connectionStatus = 'انقطع الاتصال، جاري إعادة التشغيل التلقائي...';
       if (shouldReconnect) {
         setTimeout(startWhatsAppBot, 3000);
-      } else {
-        connectionStatus = 'تم تسجيل الخروج. يرجى مسح رمز QR من جديد.';
       }
     } else if (connection === 'open') {
       latestQrDataUrl = null;
-      pairingCodeValue = null;
-      connectionStatus = '✅ البوت متصل الآن بواتساب عيادة سلامتك ويعمل بنجاح 24/7!';
-      console.log('WhatsApp Bot Connected Successfully!');
+      connectionStatus = '✅ البوت متصل الآن بالأزرار الاحترافية ويعمل بنجاح 24/7!';
+      console.log('✅ البوت متصل الآن بالأزرار الاحترافية ويعمل بنجاح!');
     }
   });
 
-  // استقبال الرسائل النصية
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
 
@@ -578,73 +684,40 @@ async function startWhatsAppBot() {
       const remoteJid = msg.key.remoteJid;
       if (!remoteJid || remoteJid.endsWith('@g.us') || remoteJid === 'status@broadcast') continue;
 
-      const text =
-        msg.message.conversation ||
-        msg.message.extendedTextMessage?.text ||
-        msg.message.buttonsResponseMessage?.selectedDisplayText ||
-        msg.message.listResponseMessage?.title ||
+      const innerMsg =
+        msg.message.viewOnceMessage?.message ||
+        msg.message.ephemeralMessage?.message ||
+        msg.message.viewOnceMessageV2?.message ||
+        msg.message;
+
+      let text =
+        innerMsg.conversation ||
+        innerMsg.extendedTextMessage?.text ||
+        innerMsg.buttonsResponseMessage?.selectedButtonId ||
+        innerMsg.buttonsResponseMessage?.selectedDisplayText ||
+        innerMsg.listResponseMessage?.singleSelectReply?.selectedRowId ||
+        innerMsg.listResponseMessage?.title ||
+        innerMsg.templateButtonReplyMessage?.selectedId ||
         '';
 
-      if (text) {
-        await handlePatientInput(remoteJid, text);
+      // التقاط ضغطة المريض على الأزرار والقوائم الاحترافية
+      const interactiveResp = innerMsg.interactiveResponseMessage;
+      if (!text && interactiveResp) {
+        try {
+          const params = JSON.parse(interactiveResp.nativeFlowResponseMessage?.paramsJson || '{}');
+          text = params.id || params.title || '';
+        } catch (e) {}
       }
-    }
-  });
 
-  // استقبال ضغطات المريض على مربعات الاختيار التفاعلية (WhatsApp Polls)
-  sock.ev.on('messages.update', async (updates) => {
-    for (const { key, update } of updates) {
-      if (update.pollUpdates) {
-        const pollCreation = pollMessagesStore.get(key.id);
-        if (pollCreation) {
-          const votes = getAggregateVotesInPollMessage({
-            message: pollCreation,
-            pollUpdates: update.pollUpdates
-          });
-          const selected = votes.find(v => v.voters.length > 0);
-          if (selected && selected.name) {
-            await handlePatientInput(key.remoteJid, selected.name);
-          }
-        }
+      if (text) {
+        await handlePatientInput(remoteJid, text, msg);
       }
     }
   });
 }
 
-// واجهة ويب للربط السريع عبر QR Code أو كود الربط (Pairing Code)
 app.get('/', (req, res) => {
-  res.send(`
-    <!DOCTYPE html>
-    <html lang="ar" dir="rtl">
-    <head>
-      <meta charset="UTF-8" />
-      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-      <title>لوحة ربط بوت عيادة سلامتك - د. أحمد سلامة</title>
-      <style>
-        body { font-family: Tahoma, Arial, sans-serif; background: #f0fdf4; color: #064e3b; text-align: center; padding: 30px; }
-        .card { max-width: 480px; margin: 0 auto; background: #fff; border-radius: 20px; padding: 25px; box-shadow: 0 8px 20px rgba(0,0,0,0.08); border: 2px solid #10b981; }
-        h1 { font-size: 20px; margin-bottom: 8px; color: #047857; }
-        .status { padding: 12px; border-radius: 12px; background: #ecfdf5; font-weight: bold; margin: 15px 0; }
-        img { max-width: 260px; border: 4px solid #047857; border-radius: 14px; margin: 10px auto; display: block; }
-        .btn { display: inline-block; padding: 10px 20px; background: #047857; color: #fff; text-decoration: none; border-radius: 10px; font-weight: bold; margin-top: 12px; }
-      </style>
-    </head>
-    <body>
-      <div class="card">
-        <h1>🦷 بوت عيادة سلامتك لطب الفم وتجميل الأسنان</h1>
-        <p>د. أحمد سلامة أبوالفتوح</p>
-        <div class="status">${connectionStatus}</div>
-        ${
-          latestQrDataUrl
-            ? `<p>افتح واتساب العيادة على موبايلك ⬅️ <b>الأجهزة المرتبطة (Linked Devices)</b> ⬅️ <b>ربط جهاز</b> وامسح الرمز التالي:</p>
-               <img src="${latestQrDataUrl}" alt="WhatsApp QR Code" />`
-            : `<p>إذا لم يظهر الرمز أو تم الربط بنجاح، اضغط تحديث الصفحة.</p>`
-        }
-        <a class="btn" href="/">🔄 تحديث الحالة / الرمز</a>
-      </div>
-    </body>
-    </html>
-  `);
+  res.send(`<h2>${connectionStatus}</h2>`);
 });
 
 app.listen(PORT, () => {
