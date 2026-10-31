@@ -176,6 +176,7 @@ async function sendInteractiveMenu(jid, text, options = [], buttonTitle = '📋 
       {}
     );
 
+    console.log(`[إرسال أزرار تفاعلية بنجاح للمريض: ${jid}]`);
     await sock.relayMessage(jid, interactiveMsg.message, {
       messageId: interactiveMsg.key.id,
       additionalNodes: [
@@ -194,6 +195,10 @@ async function sendInteractiveMenu(jid, text, options = [], buttonTitle = '📋 
               ]
             }
           ]
+        },
+        {
+          tag: 'bot',
+          attrs: { biz_bot: '1' }
         }
       ]
     });
