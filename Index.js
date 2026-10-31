@@ -227,7 +227,7 @@ async function sendSmartInteractive(jid, text, items = [], listButtonTitle = '�
   }
 
   // تجهيز الأزرار: إذا كانت 3 خيارات أو أقل وعناوينها قصيرة نستخدم أزرار مباشرة، وإلا نستخدم قائمة منسدلة كاملة واضحة
-  const allShort = items.length <= 3 && items.every(it => (it.title || '').length <= 22 && !it.desc);
+  const allShort = items.length <= 3 && items.every(it => (it.title || '').length <= 30 && !it.desc);
 
   let buttons = [];
   if (allShort) {
@@ -356,7 +356,7 @@ async function sendWelcomeMenu(jid, lastMsg = null, pushName = '') {
   const patientDisplayName = pushName || existing?.pushName || 'ضيفنا العزيز';
 
   const session = {
-    mode: 'MAIN_MENU',
+    mode: 'WELCOME_CHOICE',
     step: 0,
     waitingCustomInput: false,
     pushName: patientDisplayName,
@@ -368,28 +368,77 @@ async function sendWelcomeMenu(jid, lastMsg = null, pushName = '') {
   userSessions.set(jid, session);
 
   const welcomeMsg =
-    `أهلاً وسهلاً بحضرتك يا أستاذ/ة *${patientDisplayName}* 🌟\n` +
-    `نورتنا ومرحباً بك في البوت الذكي لـ *${CLINIC_INFO.name}* 🦷✨\n` +
-    `معاك المساعد الذكي لعيادة *${CLINIC_INFO.doctor}*\n` +
-    `(${CLINIC_INFO.title}) 👨‍⚕️\n\n` +
-    `في عيادة سلامتك، راحتك وأمانتك ووقتك هما رقم واحد:\n` +
-    `✅ *الكشف بتدفعه أول مرة فقط!* وأي استشارات أو متابعات أو جلسات علاج بعد كده بدون أي رسوم كشف جديدة.\n` +
-    `✅ *أشعة ديجيتال فورية (Sensor & Portable)* وأنت قاعد مستريح على الكرسي.\n` +
-    `✅ *جلسة خطة علاج وتشخيص قبل البدء* + متاح *تقسيط تكلفة العلاج على الجلسات* (كاش أو فودافون كاش أو إنستا باي).\n\n` +
-    `💡 *اضغط على الزر بالأسفل لاختيار ما يناسبك (أو اكتب سؤالك مباشرة في رسالة):* 👇`;
+    `أهلاً وسهلاً بحضرتك يا أستاذ/ة *${patientDisplayName}* 🌟
+` +
+    `نورتنا ومرحباً بك في *${CLINIC_INFO.name}* 🦷✨
+` +
+    `معاك المساعد الذكي لعيادة *${CLINIC_INFO.doctor}*
+` +
+    `(${CLINIC_INFO.title}) 👨‍⚕️
 
-  const mainItems = [
-    { id: 'MENU_BOOKING', title: '📅 حجز موعد أو استشارة', desc: 'حجز سريع خطوة بخطوة وتجهيز ملفك الطبي' },
-    { id: 'MENU_EMERGENCY', title: '🚨 حالات الطوارئ والحوادث', desc: 'إرشادات عاجلة للورم الشديد أو صدمات الأسنان' },
-    { id: 'MENU_SERVICES', title: '🦷 خدمات العيادة (12 خدمة)', desc: 'تعرف على كل خدمة وما تشمله بالتفصيل' },
-    { id: 'MENU_ROOT_CANAL', title: '💳 حشو العصب وتقسيط الدفع', desc: 'تفاصيل الـ 7 خطوات وتقسيط الجلسات' },
-    { id: 'MENU_WHY_US', title: '✨ ليه تختار عيادة سلامتك؟', desc: 'مميزاتنا وأجهزتنا الحديثة والتعقيم' },
-    { id: 'MENU_PLEDGE', title: '🤝 عهد الأمانة من د. أحمد', desc: 'ميثاق الحفاظ على أسنانك وراحتك النفسية' },
-    { id: 'MENU_AFTERCARE', title: '🪥 تعليمات بعد العلاج والغسيل', desc: 'إرشادات ما بعد الخلع والعصب والتركيبات' },
-    { id: 'MENU_LOCATION', title: '📍 العنوان والمواعيد واللوكيشن', desc: 'موقعنا في عزبة السوق ببنها وأرقام التواصل' }
+` +
+    `🏥 *أولاً: مميزات عيادة سلامتك لطب وتجميل الأسنان:*
+` +
+    `✅ *الكشف بتدفعه أول مرة فقط!* وأي استشارات أو متابعات أو جلسات علاج بعد كده مجاناً بدون أي رسوم كشف جديدة.
+` +
+    `✅ *أشعة ديجيتال فورية وسنسور (Sensor & Portable X-Ray):* تصوير الضرس وأنت قاعد مستريح على الكرسي بدون ما تتحرك.
+` +
+    `✅ *جلسة خطة علاج وتشخيص قبل البدء:* د. أحمد سلامة بيقعد معاك يشرح لك حالة أسنانك وخطة العلاج كاملة قبل ما نبدأ.
+` +
+    `✅ *جلسة تعليم غسيل الأسنان والعناية بعد العلاج:* بعد انتهاء العلاج، الدكتور بيعلمك عملياً إزاي تحافظ على العلاج وتغسل أسنانك صح.
+` +
+    `✅ *خامات حديثة وتعقيم دولي وتقسيط مريح:* إمكانية تقسيط تكلفة الجلسات (كاش أو فودافون كاش أو إنستا باي).
+
+` +
+    `🤖 *ثانياً: مميزات المتابعة مع المساعد الذكي (بوت العيادة):*
+` +
+    `💡 *تثقيف طبي كامل لأسنانك:* هتعرف معلومات مهمة جداً عن أسنانك وإزاي تحمي نفسك وأطفالك من التسوس وتتجنب أي مضاعفات أو تكلفة زيادة مالهاش لازمة.
+` +
+    `🔍 *معرفة تفاصيل كل خدمة:* شرح كامل لكل خدمات العيادة الـ 12 وما تشمله خطوة بخطوة + إرشادات الطوارئ والحوادث.
+` +
+    `📅 *حجز فوري وتجهيز ملفك الطبي:* في أقل من دقيقة ليطلع عليه د. أحمد سلامة قبل زيارتك.
+
+` +
+    `👇 *اختر الآن كيف تحب أن نكمل معك:*
+` +
+    `1️⃣ *متابعة الكلام مع المساعد الذكي الخاص بعيادة سلامتك د. أحمد سلامة*
+` +
+    `2️⃣ *المتابعة والتحدث مع د. أحمد سلامة مباشرة*`;
+
+  const choiceButtons = [
+    { id: 'CMD_SHOW_FULL_MENU', title: '🤖 متابعة مع المساعد الذكي' },
+    { id: 'CMD_HUMAN_CHAT', title: '👨‍⚕️ التحدث مع د. أحمد مباشرة' }
   ];
 
-  await sendSmartInteractive(jid, welcomeMsg, mainItems, '📋 القائمة الرئيسية للعيادة', lastMsg);
+  await sendSmartInteractive(jid, welcomeMsg, choiceButtons, '👇 اختر طريقة المتابعة', lastMsg);
+}
+
+async function showFullMainMenu(jid, lastMsg = null) {
+  let session = userSessions.get(jid);
+  if (!session) {
+    session = { mode: 'MAIN_MENU', step: 0, bookingData: {}, botMsgKeys: [], userMsgs: [] };
+    userSessions.set(jid, session);
+  }
+  session.mode = 'MAIN_MENU';
+
+  const menuMsg = `🦷 *القائمة الكاملة لخدمات عيادة سلامتك*
+(د. أحمد سلامة أبوالفتوح) 👨‍⚕️
+
+اضغط على الزر بالأسفل لاختيار الخدمة أو القسم المطلوب 👇`;
+
+  const mainItems = [
+    { id: 'MENU_BOOKING', title: '📅 حجز موعد أو استشارة' },
+    { id: 'MENU_SERVICES', title: '🦷 خدمات العيادة بالتفصيل' },
+    { id: 'MENU_EMERGENCY', title: '🚨 حالات الطوارئ والحوادث' },
+    { id: 'MENU_ROOT_CANAL', title: '💳 حشو العصب وتقسيط الدفع' },
+    { id: 'MENU_WHY_US', title: '✨ ليه تختار عيادة سلامتك؟' },
+    { id: 'MENU_PLEDGE', title: '🤝 عهد الأمانة من د. أحمد' },
+    { id: 'MENU_AFTERCARE', title: '🪥 تعليمات بعد العلاج والغسيل' },
+    { id: 'MENU_LOCATION', title: '📍 العنوان والمواعيد واللوكيشن' },
+    { id: 'CMD_HUMAN_CHAT', title: '👨‍⚕️ التحدث مع د. أحمد مباشرة' }
+  ];
+
+  await sendSmartInteractive(jid, menuMsg, mainItems, '📋 القائمة الكاملة للعيادة', lastMsg);
 }
 
 /**
@@ -473,7 +522,47 @@ async function handlePatientInput(jid, rawIdOrText, lastMsg = null, pushName = '
   const detectedIntent = detectSmartIntent(input);
   const activeCommand = detectedIntent || input;
 
+  // إذا اختار المريض التحدث المباشر مع الدكتور أو الاستقبال
+  if (input === 'CMD_HUMAN_CHAT' || input.includes('التحدث مباشرة') || input.includes('كلم الدكتور') || input.includes('بشري')) {
+    session.mode = 'HUMAN_CHAT';
+    await sendSmartInteractive(
+      jid,
+      `👨‍⚕️ *تم تحويلك للمحادثة المباشرة مع د. أحمد سلامة وطاقم عيادة سلامتك*\n\nاتفضل اكتب استفسارك أو رسالتك هنا في الشات بالتفصيل، وهيتم الرد عليك في أقرب وقت خلال ساعات العمل (من 3 عصراً حتى 10 مساءً ما عدا الجمعة).\n\n💡 *(لو حبيت ترجع للبوت التفاعلي السريع في أي وقت، اكتب بس كلمة "بوت" أو "0")*.`,
+      [{ id: 'CMD_MAIN_MENU', title: '🤖 العودة للبوت الذكي' }],
+      'اختر',
+      lastMsg,
+      true // تبقى مسجلة
+    );
+
+    // إلغاء أرشفة المحادثة وإرسال إشعار تنبيه للدكتور
+    try {
+      if (lastMsg) {
+        await sock.chatModify({ archive: false, lastMessages: [lastMsg] }, jid);
+      }
+      const patientPhone = session.cleanPhone || jid.split('@')[0];
+      const humanAlert = `🔔 *تنبيه: المريض (${session.pushName || 'مريض جديد'}) طلب التحدث معك مباشرة على الواتساب!*\n📱 رقم المريض: ${patientPhone}\n💬 اضغط للتحدث معه: https://wa.me/${patientPhone.startsWith('01') ? '2' + patientPhone : patientPhone}`;
+      await sock.sendMessage(DOCTOR_JID, { text: humanAlert });
+    } catch (e) {}
+    return;
+  }
+
+  // إذا كانت المحادثة في وضع التحويل البشري (HUMAN_CHAT) والبوت صامت
+  if (session.mode === 'HUMAN_CHAT') {
+    // إذا كتب 0 أو بوت أو قائمة يرجع للبوت
+    if (input === '0' || input === 'بوت' || input.includes('القائمة') || input.includes('رئيسية')) {
+      await sendWelcomeMenu(jid, lastMsg, session.pushName);
+      return;
+    }
+    // غير ذلك: يظل البوت صامتاً تماماً ليسمح للدكتور بالرد على المريض بحرية!
+    return;
+  }
+
   // ==================== معالجة القوائم والأقسام ====================
+  if (activeCommand === 'CMD_SHOW_FULL_MENU' || input === 'CMD_SHOW_FULL_MENU') {
+    await showFullMainMenu(jid, lastMsg);
+    return;
+  }
+
   if (activeCommand === 'MENU_BOOKING') {
     await startBookingFlow(jid, lastMsg, session.pushName);
     return;
@@ -562,8 +651,7 @@ async function handlePatientInput(jid, rawIdOrText, lastMsg = null, pushName = '
     session.mode = 'SERVICES_MENU';
     const srvItems = SERVICES_DATA.map(s => ({
       id: s.id,
-      title: s.title,
-      desc: s.desc
+      title: s.title
     }));
     await sendSmartInteractive(
       jid,
@@ -960,8 +1048,7 @@ async function processBookingStep(jid, session, input, lastMsg) {
 
     const serviceChoiceRows = SERVICES_DATA.map(s => ({
       id: s.id,
-      title: s.title,
-      desc: s.desc
+      title: s.title
     }));
 
     await sendSmartInteractive(
