@@ -1,5 +1,5 @@
 /**
- * بوت واتساب الاحترافي الذكي (الإصدار الرابع V4 — Minimal, Humanized & Fast Auto-Clean)
+ * بوت واتساب الاحترافي الذكي (الإصدار الخامس V5 — Pure Disappear & Zero "Message Deleted" Tombstones)
  * عيادة سلامتك لطب الفم وتجميل الأسنان — د. أحمد سلامة أبوالفتوح
  * العنوان: بنها - منشية النور - أول شارع الشموت - عمارة خشالة - أعلى موقف السوزوكي
  */
@@ -119,11 +119,9 @@ function extractCleanPhoneNumber(msg, jid) {
     const str = String(cand);
     if (str.endsWith('@lid')) continue;
     const raw = str.split('@')[0].split(':')[0].replace(/\D/g, '');
-    // رقم مصري بصيغة 201xxxxxxxxx
     if (raw.startsWith('201') && raw.length === 12) {
       return '0' + raw.substring(2);
     }
-    // رقم مصري بصيغة 01xxxxxxxxx
     if (raw.startsWith('01') && raw.length === 11) {
       return raw;
     }
@@ -132,117 +130,144 @@ function extractCleanPhoneNumber(msg, jid) {
 }
 
 /**
- * مسح الرسائل التمهيدية بعد 5 ثوانٍ فقط وإخفاء أثرها من الشات
- * حتى تبقى المحادثة بين الدكتور والمريض نظيفة تماماً (Minimal)
+ * إخفاء كامل لمحادثة البوت التمهيدية (سواء رسائل البوت أو اختيارات المريض الزرقاء/الخضراء)
+ * بدون ترك أي علامة "تم مسح هذه الرسالة" (Zero "This message was deleted" tombstones!)
+ * يتم التنفيذ عبر chatModify (clear & delete) على كل من معرف @lid ومعرف الرقم @s.whatsapp.net
  */
-function scheduleFiveSecondClean(jid, botMsgKey, userIncomingMsg) {
-  setTimeout(async () => {
-    const nowTs = Math.floor(Date.now() / 1000);
+async function vanishBotConversationCompletely(jid, session) {
+  if (!session || !session.trackedMessages || session.trackedMessages.length === 0) return;
 
-    // 1. مسح رسالة البوت لدى المريض ولدى الدكتور
-    if (botMsgKey) {
+  const msgs = [...session.trackedMessages];
+  session.trackedMessages = [];
+
+  // تحديد جميع المعرفات الممكنة للمحادثة (سواء @lid أو @s.whatsapp.net) لضمان استجابة الهاتف فوراً
+  const targetJids = new Set([jid]);
+  if (session.cleanPhone && session.cleanPhone.startsWith('01')) {
+    targetJids.add(`2${session.cleanPhone}@s.whatsapp.net`);
+  }
+  if (session.senderPn) {
+    targetJids.add(session.senderPn);
+  }
+
+  const lastM = msgs[msgs.length - 1];
+
+  for (const targetJid of targetJids) {
+    // 1. مسح كل الرسائل المسجلة في الجلسة (رسائل البوت + اختيارات المريض) بدون "This message was deleted"
+    try {
+      const clearList = msgs.map(m => ({
+        id: m.id,
+        fromMe: m.fromMe,
+        timestamp: String(m.timestamp)
+      }));
+      await sock.chatModify(
+        { clear: { messages: clearList } },
+        targetJid,
+        []
+      );
+    } catch (e) {}
+
+    // 2. مسح شامل لسجل المحادثة التمهيدي حتى آخر رسالة قبل ملخص الحجز النهائي
+    if (lastM) {
       try {
-        await sock.sendMessage(jid, { delete: botMsgKey });
-      } catch (e) {}
-
-      // مسح إشعار "تم مسح هذه الرسالة" من هاتف الدكتور بعد ثانية واحدة
-      setTimeout(async () => {
-        try {
-          await sock.chatModify(
-            {
-              deleteForMe: {
-                deleteMedia: false,
-                key: botMsgKey,
-                timestamp: nowTs
+        await sock.chatModify(
+          {
+            delete: true,
+            lastMessages: [
+              {
+                key: {
+                  remoteJid: targetJid,
+                  fromMe: lastM.fromMe,
+                  id: lastM.id
+                },
+                messageTimestamp: Number(lastM.timestamp)
               }
-            },
-            jid
-          );
-        } catch (e) {}
-      }, 1200);
-    }
-
-    // 2. مسح ضغطة/رسالة العميل التمهيدية من شات الدكتور بدون ترك أي أثر
-    if (userIncomingMsg && userIncomingMsg.key) {
-      const msgTs = Number(userIncomingMsg.messageTimestamp) || nowTs;
-      try {
-        await sock.chatModify(
-          {
-            deleteForMe: {
-              deleteMedia: false,
-              key: userIncomingMsg.key,
-              timestamp: msgTs
-            }
+            ]
           },
-          jid
-        );
-      } catch (e) {}
-      try {
-        await sock.chatModify(
-          {
-            clear: {
-              messages: [
-                {
-                  id: userIncomingMsg.key.id,
-                  fromMe: userIncomingMsg.key.fromMe,
-                  timestamp: msgTs
-                }
-              ]
-            }
-          },
-          jid
+          targetJid
         );
       } catch (e) {}
     }
-  }, 5000); // 5 ثوانٍ بالضبط بعد الانتقال للخطوة التالية!
+  }
 }
 
 /**
- * تنظيف الخطوة السابقة بعد 5 ثوانٍ من انتقال المريض للخطوة الجديدة
+ * إعادة ضبط مؤقت الاختفاء التلقائي (30 ثانية):
+ * بعد 30 ثانية من آخر تفاعل مع البوت، تختفي كل رسائل البوت واختيارات المريض كأنها لم تكن!
  */
-function cleanPreviousStepAfter5Seconds(jid, session, currentIncomingMsg) {
+function resetThirtySecondVanishTimer(jid, session) {
   if (!session) return;
-
-  const prevBotKeys = [...(session.botMsgKeys || [])];
-  const prevUserMsgs = [...(session.userMsgs || [])];
-  if (currentIncomingMsg && currentIncomingMsg.key) {
-    prevUserMsgs.push(currentIncomingMsg);
+  if (session.vanishTimer) {
+    clearTimeout(session.vanishTimer);
   }
-
-  session.botMsgKeys = [];
-  session.userMsgs = [];
-
-  for (const bKey of prevBotKeys) {
-    scheduleFiveSecondClean(jid, bKey, null);
-  }
-  for (const uMsg of prevUserMsgs) {
-    scheduleFiveSecondClean(jid, null, uMsg);
-  }
+  session.vanishTimer = setTimeout(async () => {
+    await vanishBotConversationCompletely(jid, session);
+  }, 30 * 1000); // 30 ثانية بالضبط
 }
 
 /**
- * إرسال رسالة تفاعلية بأزرار احترافية مع تنظيف الخطوة السابقة خلال 5 ثوانٍ
+ * تسجيل أي رسالة (من البوت أو من المريض) في قائمة الإخفاء التلقائي
+ */
+function trackMessageForVanish(session, key, timestamp) {
+  if (!session || !key || !key.id) return;
+  session.trackedMessages = session.trackedMessages || [];
+  const ts = Number(timestamp) || Math.floor(Date.now() / 1000);
+  session.trackedMessages.push({
+    id: key.id,
+    fromMe: Boolean(key.fromMe),
+    timestamp: ts,
+    key: key
+  });
+}
+
+/**
+ * إرسال رسالة تفاعلية بأزرار احترافية بدون أي "This message was deleted"
  */
 async function sendSmartInteractive(jid, text, items = [], listButtonTitle = '📋 اضغط هنا للاختيار', lastIncomingMsg = null, keepForever = false) {
   let session = userSessions.get(jid);
   if (!session) {
-    session = { mode: 'MAIN_MENU', step: 0, bookingData: {}, botMsgKeys: [], userMsgs: [] };
+    session = { mode: 'MAIN_MENU', step: 0, bookingData: {}, trackedMessages: [] };
     userSessions.set(jid, session);
   }
 
   if (lastIncomingMsg && lastIncomingMsg.key) {
+    if (lastIncomingMsg.key.senderPn) {
+      session.senderPn = lastIncomingMsg.key.senderPn;
+    }
     try {
       await sock.readMessages([lastIncomingMsg.key]);
     } catch (e) {}
+
+    if (!keepForever) {
+      trackMessageForVanish(session, lastIncomingMsg.key, lastIncomingMsg.messageTimestamp);
+    }
   }
 
-  // مسح الرسائل السابقة بعد 5 ثوانٍ من إرسال الخطوة الجديدة
-  cleanPreviousStepAfter5Seconds(jid, session, keepForever ? null : lastIncomingMsg);
+  // مسح الرسائل السابقة فوراً من شاشة الهاتف بدون ترك "This message was deleted"
+  if (!keepForever && session.trackedMessages && session.trackedMessages.length > 1) {
+    const targetJids = new Set([jid]);
+    if (session.cleanPhone && session.cleanPhone.startsWith('01')) {
+      targetJids.add(`2${session.cleanPhone}@s.whatsapp.net`);
+    }
+    if (session.senderPn) {
+      targetJids.add(session.senderPn);
+    }
+    const toClearNow = session.trackedMessages.map(m => ({
+      id: m.id,
+      fromMe: m.fromMe,
+      timestamp: String(m.timestamp)
+    }));
+    for (const tJid of targetJids) {
+      try {
+        await sock.chatModify({ clear: { messages: toClearNow } }, tJid, []);
+      } catch (e) {}
+    }
+  }
 
   if (!items || items.length === 0) {
-    const sent = await sock.sendMessage(jid, { text });
+    const sent = await sock.sendMessage(jid, { text }, { ephemeralExpiration: 86400 });
     if (sent && sent.key && !keepForever) {
-      session.botMsgKeys.push(sent.key);
+      trackMessageForVanish(session, sent.key, sent.messageTimestamp);
+      resetThirtySecondVanishTimer(jid, session);
     }
     return;
   }
@@ -302,7 +327,10 @@ async function sendSmartInteractive(jid, text, items = [], listButtonTitle = '�
               nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
                 buttons,
                 messageParamsJson: ''
-              })
+              }),
+              contextInfo: {
+                expiration: 86400
+              }
             })
           }
         }
@@ -337,20 +365,21 @@ async function sendSmartInteractive(jid, text, items = [], listButtonTitle = '�
     });
 
     if (!keepForever && interactiveMsg.key) {
-      session.botMsgKeys.push(interactiveMsg.key);
+      trackMessageForVanish(session, interactiveMsg.key, interactiveMsg.messageTimestamp);
+      resetThirtySecondVanishTimer(jid, session);
     }
   } catch (err) {
     console.error('Fallback send error:', err.message);
-    const sentFallback = await sock.sendMessage(jid, { text });
+    const sentFallback = await sock.sendMessage(jid, { text }, { ephemeralExpiration: 86400 });
     if (sentFallback && sentFallback.key && !keepForever) {
-      session.botMsgKeys.push(sentFallback.key);
+      trackMessageForVanish(session, sentFallback.key, sentFallback.messageTimestamp);
+      resetThirtySecondVanishTimer(jid, session);
     }
   }
 }
 
 /**
  * رسالة الترحيب الأولى: مختصرة، جذابة، احترافية (To The Point)
- * وتحتها خيار المتابعة مع المساعد الذكي أو التحدث المباشر مع د. أحمد سلامة
  */
 async function sendWelcomeMenu(jid, lastMsg = null, pushName = '') {
   let existing = userSessions.get(jid);
@@ -364,9 +393,10 @@ async function sendWelcomeMenu(jid, lastMsg = null, pushName = '') {
     waitingHumanPhone: false,
     pushName: patientDisplayName,
     cleanPhone: cleanPhone,
+    senderPn: lastMsg?.key?.senderPn || existing?.senderPn || '',
     bookingData: {},
-    botMsgKeys: existing?.botMsgKeys || [],
-    userMsgs: existing?.userMsgs || []
+    trackedMessages: existing?.trackedMessages || [],
+    vanishTimer: existing?.vanishTimer || null
   };
   userSessions.set(jid, session);
 
@@ -396,7 +426,7 @@ async function sendWelcomeMenu(jid, lastMsg = null, pushName = '') {
 async function showFullMainMenu(jid, lastMsg = null) {
   let session = userSessions.get(jid);
   if (!session) {
-    session = { mode: 'MAIN_MENU', step: 0, bookingData: {}, botMsgKeys: [], userMsgs: [] };
+    session = { mode: 'MAIN_MENU', step: 0, bookingData: {}, trackedMessages: [] };
     userSessions.set(jid, session);
   }
   session.mode = 'MAIN_MENU';
@@ -422,9 +452,6 @@ async function showFullMainMenu(jid, lastMsg = null) {
   await sendSmartInteractive(jid, menuMsg, mainItems, '📋 القائمة الرئيسية للعيادة', lastMsg);
 }
 
-/**
- * فهم ذكي وطبيعي للرسائل المكتوبة (Humanized NLU)
- */
 function detectSmartIntent(text) {
   const t = text.toLowerCase().trim();
   if (
@@ -469,11 +496,7 @@ function detectSmartIntent(text) {
   return null;
 }
 
-/**
- * تحويل المحادثة للتحدث المباشر مع د. أحمد مع ضمان إرسال رقم موبايل سليم 100% للدكتور
- */
 async function triggerHumanChatHandoff(jid, session, lastMsg) {
-  // إذا كان المريض مفعل خاصية إخفاء الرقم باليوزر نيم (@lid) ولم نعرف رقمه بعد، نطلبه منه أولاً في خطوة مستقلة!
   if (!session.cleanPhone) {
     session.mode = 'WAITING_HUMAN_PHONE';
     await sendSmartInteractive(
@@ -497,7 +520,7 @@ async function completeHumanChatHandoff(jid, session, lastMsg) {
     [{ id: 'CMD_SHOW_FULL_MENU', title: '🤖 العودة للمساعد الذكي' }],
     'اختر',
     lastMsg,
-    false // يتم تنظيف رسالة التحويل أيضاً بعد الانتهاء لتبقى محادثتك البشرية فقط
+    false
   );
 
   try {
@@ -522,11 +545,13 @@ async function handlePatientInput(jid, rawIdOrText, lastMsg = null, pushName = '
   if (session && detectedPhone) {
     session.cleanPhone = detectedPhone;
   }
+  if (session && lastMsg?.key?.senderPn) {
+    session.senderPn = lastMsg.key.senderPn;
+  }
   if (session && pushName && (!session.pushName || session.pushName === 'ضيفنا العزيز')) {
     session.pushName = pushName;
   }
 
-  // 1. فحص فوري للإلغاء أو العودة للبداية أو القائمة الرئيسية من أي مكان وفي أي وقت!
   if (
     input === 'CMD_MAIN_MENU' ||
     input === '0' ||
@@ -559,7 +584,6 @@ async function handlePatientInput(jid, rawIdOrText, lastMsg = null, pushName = '
     return;
   }
 
-  // إذا كان المريض يُدخل رقمه للتحدث المباشر (لأصحاب حسابات اليوزر نيم المخفية)
   if (session.mode === 'WAITING_HUMAN_PHONE') {
     const digits = input.replace(/\D/g, '');
     session.cleanPhone = digits || input;
@@ -567,30 +591,25 @@ async function handlePatientInput(jid, rawIdOrText, lastMsg = null, pushName = '
     return;
   }
 
-  // إذا طلب التحدث المباشر مع د. أحمد
   if (input === 'CMD_HUMAN_CHAT' || input.includes('التحدث مع د. أحمد مباشرة')) {
     await triggerHumanChatHandoff(jid, session, lastMsg);
     return;
   }
 
-  // إذا كان في وضع المحادثة البشرية مع الدكتور، يصمت البوت تماماً (إلا إذا طلب العودة للبوت أعلاه)
   if (session.mode === 'HUMAN_CHAT') {
     return;
   }
 
-  // إذا ضغط على بدء الحجز
   if (input === 'MENU_BOOKING' || input === 'CMD_START_BOOKING') {
     await startBookingFlow(jid, lastMsg, pushName || session.pushName);
     return;
   }
 
-  // إذا كان المريض داخل خطوات الحجز، نمرر إجابته لنظام الحجز
   if (session.mode === 'BOOKING') {
     await processBookingStep(jid, session, input, lastMsg);
     return;
   }
 
-  // فهم ذكي لما يكتبه المريض في الشات
   const detectedIntent = detectSmartIntent(input);
   const activeCommand = detectedIntent || input;
 
@@ -604,7 +623,6 @@ async function handlePatientInput(jid, rawIdOrText, lastMsg = null, pushName = '
     return;
   }
 
-  // ==================== قسم الطوارئ والحوادث ====================
   if (activeCommand === 'MENU_EMERGENCY') {
     session.mode = 'EMERGENCY_MENU';
     await sendSmartInteractive(
@@ -684,7 +702,6 @@ async function handlePatientInput(jid, rawIdOrText, lastMsg = null, pushName = '
     return;
   }
 
-  // ==================== قسم خدمات العيادة الـ 12 ====================
   if (activeCommand === 'MENU_SERVICES') {
     session.mode = 'SERVICES_MENU';
     const srvItems = SERVICES_DATA.map(s => ({
@@ -717,7 +734,6 @@ async function handlePatientInput(jid, rawIdOrText, lastMsg = null, pushName = '
     return;
   }
 
-  // ==================== حشو العصب وتقسيط الدفع ====================
   if (activeCommand === 'MENU_ROOT_CANAL') {
     const msg = `💳 *تفاصيل حشو العصب المتكامل وتسهيلات الدفع في عيادة سلامتك*\n\nحشو العصب هو عملية طبية متكاملة لإنقاذ ضرسك الطبيعي بدلاً من خلعه، ويشمل في عيادتنا *7 خطوات كاملة*:\n1️⃣ أشعة ديجيتال وسنسور قبل وأثناء وبعد الحشو.\n2️⃣ تخدير موضعي كامل بدون ألم.\n3️⃣ إزالة التسوس بالكامل وتنظيف الضرس.\n4️⃣ سحب العصب وتطهير الجذور بأحدث أجهزة الروتاري.\n5️⃣ حشو القنوات العصبية بالكامل.\n6️⃣ تركيب الدعامة (الوتد) لتقوية الضرس وحمايته من الكسر.\n7️⃣ الحشو الدائم النهائي فوق الضرس + شرح طريقة العناية به.\n\n🌟 *تسهيلات مريحة في السداد:*\n✅ *تقسيم التكلفة على الجلسات:* يتم العمل على جلسات، ويمكنك دفع جزء مريح في كل جلسة دون ضغط.\n✅ *الكشف يُدفع أول مرة فقط:* لا توجد أي رسوم كشف إضافية في الجلسات التالية.\n✅ *طرق الدفع المتاحة:* نقداً (كاش) بالعيادة، أو عبر *فودافون كاش (Vodafone Cash)* أو *إنستا باي (InstaPay)*.`;
     await sendSmartInteractive(
@@ -734,7 +750,6 @@ async function handlePatientInput(jid, rawIdOrText, lastMsg = null, pushName = '
     return;
   }
 
-  // ==================== مميزات العيادة ====================
   if (activeCommand === 'MENU_WHY_US') {
     const msg = `✨ *لماذا يختار المرضى في منشية النور وبنها عيادة سلامتك؟*\n\n1️⃣ *أشعة ديجيتال وسنسور فوري (Portable X-Ray & Sensor):*\nتصوير الضرس وأنت جالس على الكرسي في ثوانٍ دون الحاجة للتحرك، ومشاهدة الصورة بوضوح على الشاشة.\n\n2️⃣ *جلسة خطة علاج وتشخيص قبل البدء:*\nيجلس معك د. أحمد سلامة لشرح حالة أسنانك بالكامل ووضع خطة العلاج المناسبة قبل البدء في أي إجراء.\n\n3️⃣ *جلسة تعليم غسيل الأسنان والعناية بعد العلاج:*\nبعد انتهاء العلاج، يشرح لك الدكتور عملياً كيفية الحفاظ على العلاج والطريقة الصحيحة لتفريش أسنانك.\n\n4️⃣ *الكشف يُدفع مرة واحدة فقط:*\nتدفع الكشف في الزيارة الأولى فقط، وجميع جلسات العلاج والاستشارات والمتابعات التالية مجانية.\n\n5️⃣ *نظام تعقيم طبي متكامل وعلاج بدون ألم:*\nأدوات معقمة في أكياس فردية تُفتح أمامك، مع استخدام جل مخدر موضعي قبل البنج وخامات أصلية حديثة.`;
     await sendSmartInteractive(
@@ -751,7 +766,6 @@ async function handlePatientInput(jid, rawIdOrText, lastMsg = null, pushName = '
     return;
   }
 
-  // ==================== ميثاق الأمانة ====================
   if (activeCommand === 'MENU_PLEDGE') {
     const msg = `🤝 *ميثاق الأمانة وراحة المريض من د. أحمد سلامة أبوالفتوح:*\n\n🦷 *1. الحفاظ على الضرس الطبيعي (بدون استعجال في الخلع):*\nلا نلجأ لخلع أي ضرس طالما هناك فرصة لعلاجه والحفاظ عليه.\n\n💰 *2. خدمة طبية محترمة تناسب ما تدفعه:*\nنلتزم بتقديم رعاية طبية متقنة بأحدث الأجهزة وخامات أصلية تعيش معك طويلاً، ونوضح لك بكل أمانة ما هو ضروري وما يمكن تأجيله.\n\n💳 *3. تيسير في الدفع وتقسيط على الجلسات:*\nفي العلاجات التي تتم على جلسات (مثل حشو العصب أو التركيبات)، يمكنك تقسيم التكلفة على دفعات مريحة مع كل جلسة (كاش أو فودافون كاش أو إنستا باي).\n\n💉 *4. راحتك النفسية أولاً:*\nلا نبدأ العمل إلا بعد التأكد التام من مفعول التخدير وراحتك الكاملة.`;
     await sendSmartInteractive(
@@ -768,7 +782,6 @@ async function handlePatientInput(jid, rawIdOrText, lastMsg = null, pushName = '
     return;
   }
 
-  // ==================== تعليمات ما بعد العلاج والغسيل ====================
   if (activeCommand === 'MENU_AFTERCARE') {
     await sendSmartInteractive(
       jid,
@@ -811,7 +824,6 @@ async function handlePatientInput(jid, rawIdOrText, lastMsg = null, pushName = '
     return;
   }
 
-  // ==================== العنوان والمواعيد ====================
   if (activeCommand === 'MENU_LOCATION') {
     const msg = `📍 *عنوان ومواعيد ${CLINIC_INFO.name}*\n\n👨‍⚕️ *الطبيب المعالج:*\n${CLINIC_INFO.doctor}\n(${CLINIC_INFO.title})\n\n🏢 *العنوان بالتفصيل:*\n${CLINIC_INFO.address}\n\n🗺️ *موقع العيادة على خرائط جوجل (Google Maps):*\n${CLINIC_INFO.mapsUrl}\n\n📘 *صفحتنا الرسمية على فيسبوك:*\n${CLINIC_INFO.fbUrl}\n\n🕒 *مواعيد العمل:*\n${CLINIC_INFO.hours}\n\n📞 *رقم الهاتف والواتساب:*\n*${CLINIC_INFO.phone}*`;
     await sendSmartInteractive(
@@ -832,14 +844,6 @@ async function handlePatientInput(jid, rawIdOrText, lastMsg = null, pushName = '
 }
 
 // ==================== نظام الحجز والاستبيان الإحصائي الذكي (4 خطوات مركزة) ====================
-/**
- * بناءً على توجيه د. أحمد: تم إلغاء الأسئلة (2 العمر، 4 التاريخ المرضي، 5 الوجع، 7 الخدمة، 9 الموعد)
- * والإبقاء على الاستبيان الإحصائي المركز:
- * 1. الاسم الثلاثي (وطلب الرقم فقط في خطوة مستقلة لمن يخفي رقمه باليوزر نيم).
- * 2. البلد / المنطقة (منشية النور والقرى المجاورة وبنها...).
- * 3. التجربة السابقة وما يشغل بال المريض.
- * 4. كيف تعرف المريض على العيادة (سوشيال ميديا / ترشيح صديق مع إمكانية كتابة اسمه / أهل المنطقة / بالصدفة).
- */
 async function startBookingFlow(jid, lastMsg = null, pushName = '') {
   let oldSession = userSessions.get(jid);
   const cleanPhone = extractCleanPhoneNumber(lastMsg, jid) || oldSession?.cleanPhone || '';
@@ -851,8 +855,9 @@ async function startBookingFlow(jid, lastMsg = null, pushName = '') {
     waitingCustomInput: false,
     pushName: displayName,
     cleanPhone: cleanPhone,
-    botMsgKeys: oldSession?.botMsgKeys || [],
-    userMsgs: oldSession?.userMsgs || [],
+    senderPn: lastMsg?.key?.senderPn || oldSession?.senderPn || '',
+    trackedMessages: oldSession?.trackedMessages || [],
+    vanishTimer: oldSession?.vanishTimer || null,
     bookingData: {
       name: '',
       phone: cleanPhone,
@@ -899,7 +904,7 @@ async function processBookingStep(jid, session, input, lastMsg) {
   session.waitingCustomInput = false;
   const step = session.step;
 
-  // -------------------- الخطوة 1: الاسم (وفحص الرقم المخفي باليوزر نيم) --------------------
+  // -------------------- الخطوة 1: الاسم --------------------
   if (step === 1) {
     let chosenName = input;
     if (input.startsWith('USE_NAME_')) {
@@ -907,8 +912,6 @@ async function processBookingStep(jid, session, input, lastMsg) {
     }
     session.bookingData.name = chosenName;
 
-    // إذا كان الواتساب قد قرأ الرقم بالفعل لا نسأله عن الرقم نهائياً!
-    // أما إذا كان المريض يخفي رقمه ويستخدم الـ Username فقط، نطلبه منه في خطوة مستقلة:
     if (!session.bookingData.phone) {
       session.step = 1.5;
       await sendSmartInteractive(
@@ -926,7 +929,6 @@ async function processBookingStep(jid, session, input, lastMsg) {
     return;
   }
 
-  // خطوة مستقلة فقط لمن يخفي رقمه باليوزر نيم
   if (step === 1.5) {
     const digits = input.replace(/\D/g, '');
     session.bookingData.phone = digits || input;
@@ -1010,7 +1012,7 @@ async function processBookingStep(jid, session, input, lastMsg) {
     return;
   }
 
-  // -------------------- الخطوة 4 والأخيرة: إتمام الحجز وإرسال الملخص النهائي --------------------
+  // -------------------- الخطوة 4 والأخيرة: إخفاء كل المحادثة التمهيدية ثم إرسال ملخص الحجز النهائي فقط --------------------
   if (step === 4) {
     const sourceMap = {
       'SRC_1': 'عن طريق السوشيال ميديا',
@@ -1022,13 +1024,22 @@ async function processBookingStep(jid, session, input, lastMsg) {
     session.mode = 'MAIN_MENU';
     session.step = 0;
 
-    // تنظيف آخر خطوة تمهيدية بعد 5 ثوانٍ
-    cleanPreviousStepAfter5Seconds(jid, session, lastMsg);
+    if (lastMsg && lastMsg.key) {
+      trackMessageForVanish(session, lastMsg.key, lastMsg.messageTimestamp);
+    }
+
+    if (session.vanishTimer) {
+      clearTimeout(session.vanishTimer);
+      session.vanishTimer = null;
+    }
+
+    // 1. إخفاء جميع رسائل البوت واختيارات المريض السابقة كأنها لم تكن (بدون This message was deleted)!
+    await vanishBotConversationCompletely(jid, session);
 
     const d = session.bookingData;
     const finalPhone = d.phone || session.cleanPhone || 'مسجل بالمحادثة';
 
-    // 1. رسالة تأكيد الحجز النهائية التي تصل للمريض وتبقى مسجلة في المحادثة (لا تُمسح أبداً!)
+    // 2. إرسال بطاقة تأكيد الحجز النهائي فقط لتبقى مسجلة وحدها في المحادثة
     const summaryForPatient =
       `✅ *بطاقة تأكيد الحجز النهائي — ${CLINIC_INFO.name}*\n` +
       `👨‍⚕️ *${CLINIC_INFO.doctor}*\n` +
@@ -1054,10 +1065,10 @@ async function processBookingStep(jid, session, input, lastMsg) {
       ],
       'اختر',
       null,
-      true // keepForever = true (تظل مسجلة عند المريض وعند الدكتور!)
+      true // keepForever = true (تبقى مسجلة وحدها في الشات!)
     );
 
-    // 2. إرسال بطاقة الحجز النهائية إلى رقم الدكتور الأساسي (My Number)
+    // 3. إرسال نسخة من بطاقة الحجز النهائية إلى رقم الدكتور الأساسي (My Number)
     const waLinkPhone = finalPhone.startsWith('01') ? `2${finalPhone}` : '';
     const doctorSummary =
       `🔔 *رسالة حجز نهائي جديدة — عيادة سلامتك*\n` +
@@ -1140,9 +1151,9 @@ async function startWhatsAppBot() {
       }
     } else if (connection === 'open') {
       latestQrDataUrl = null;
-      connectionStatus = '✅ البوت الذكي V4 متصل الآن ويعمل بنجاح 24/7!';
+      connectionStatus = '✅ البوت الذكي V5 متصل الآن ويعمل بنجاح 24/7!';
       console.log('\n==================================================');
-      console.log('✅ البوت الذكي V4 متصل الآن ويعمل بنجاح 24/7!');
+      console.log('✅ البوت الذكي V5 متصل الآن ويعمل بنجاح 24/7!');
       console.log('==================================================\n');
     }
   });
@@ -1199,7 +1210,7 @@ app.get('/', (req, res) => {
       <meta charset="UTF-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1.0" />
       <meta http-equiv="refresh" content="5" />
-      <title>بوت عيادة سلامتك الذكي V4</title>
+      <title>بوت عيادة سلامتك الذكي V5</title>
       <style>
         body { font-family: Tahoma, Arial, sans-serif; background: #f0fdf4; color: #064e3b; text-align: center; padding: 25px; }
         .card { max-width: 440px; margin: 0 auto; background: #fff; border-radius: 20px; padding: 25px; box-shadow: 0 8px 25px rgba(0,0,0,0.08); border: 2px solid #10b981; }
@@ -1208,7 +1219,7 @@ app.get('/', (req, res) => {
     </head>
     <body>
       <div class="card">
-        <h2>🦷 بوت عيادة سلامتك الذكي (V4)</h2>
+        <h2>🦷 بوت عيادة سلامتك الذكي (V5)</h2>
         <p>د. أحمد سلامة أبوالفتوح</p>
         <div class="status">${connectionStatus}</div>
       </div>
