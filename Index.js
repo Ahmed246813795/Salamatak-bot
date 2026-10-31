@@ -155,10 +155,50 @@ function extractCleanPhoneNumber(msg, jid) {
  * دالة Auto-Delete: تمسح الرسائل التمهيدية السابقة من المحادثة
  * بحيث لا يتبقى في الشات في النهاية إلا رسالة الحجز النهائي فقط
  */
+/**
+ * جدولة مسح تلقائي بعد دقيقة واحدة (60 ثانية) لأي رسالة خاصة بالبوت أو اختيارات العميل مع البوت
+ * بحيث تختفي تماماً من عند العميل ومن عند الدكتور ولا يتبقى في الشات إلا المحادثة البشرية العادية ورسالة الحجز النهائي
+ */
+function scheduleOneMinuteAutoDelete(jid, botMsgKey, userIncomingMsg) {
+  setTimeout(async () => {
+    // 1. مسح رسالة البوت لدى الطرفين (تختفي من عند المريض ومن عند الدكتور)
+    if (botMsgKey) {
+      try {
+        await sock.sendMessage(jid, { delete: botMsgKey });
+      } catch (e) {}
+    }
+
+    // 2. مسح اختيار أو رسالة العميل الموجهة للبوت من سجل المحادثة
+    if (userIncomingMsg && userIncomingMsg.key) {
+      try {
+        await sock.sendMessage(jid, { delete: userIncomingMsg.key });
+      } catch (e) {}
+      try {
+        await sock.chatModify(
+          {
+            clear: {
+              messages: [
+                {
+                  id: userIncomingMsg.key.id,
+                  fromMe: userIncomingMsg.key.fromMe,
+                  timestamp: userIncomingMsg.messageTimestamp || Math.floor(Date.now() / 1000)
+                }
+              ]
+            }
+          },
+          jid
+        );
+      } catch (e) {}
+    }
+  }, 60 * 1000); // 60 ثانية (دقيقة واحدة)
+}
+
+/**
+ * مسح فوري للخطوة السابقة عند انتقال العميل للخطوة التالية
+ */
 async function autoDeletePreviousMessages(jid, session) {
   if (!session) return;
 
-  // 1. مسح رسائل البوت التمهيدية السابقة لدى الطرفين (Delete for Everyone)
   if (session.botMsgKeys && session.botMsgKeys.length > 0) {
     const keysToDelete = [...session.botMsgKeys];
     session.botMsgKeys = [];
@@ -169,7 +209,6 @@ async function autoDeletePreviousMessages(jid, session) {
     }
   }
 
-  // 2. مسح رسائل المريض التمهيدية من شاشة الدكتور + أرشفة المحادثة المؤقتة
   if (session.userMsgs && session.userMsgs.length > 0) {
     const msgsToClear = [...session.userMsgs];
     session.userMsgs = [];
@@ -196,8 +235,8 @@ async function autoDeletePreviousMessages(jid, session) {
 }
 
 /**
- * إرسال رسالة تفاعلية بأزرار احترافية (Quick Reply أو Single Select List)
- * بدون تقطيع الكلمات وبدون تكرار العناوين، مع حفظ مفتاح الرسالة للمسح التلقائي لاحقاً
+ * إرسال رسالة تفاعلية بأزرار احترافية مع تفعيل المسح التلقائي بعد دقيقة واحدة (60 ثانية)
+ * وبدون نقل المحادثة للأرشيف نهائياً
  */
 async function sendSmartInteractive(jid, text, items = [], listButtonTitle = '📋 اضغط هنا للاختيار', lastIncomingMsg = null, keepForever = false) {
   let session = userSessions.get(jid);
@@ -206,27 +245,29 @@ async function sendSmartInteractive(jid, text, items = [], listButtonTitle = '�
     userSessions.set(jid, session);
   }
 
-  // تسجيل رسالة المريض الواردة ليتم تنظيفها تلقائياً
+  if (lastIncomingMsg && lastIncomingMsg.key) {
+    try {
+      await sock.readMessages([lastIncomingMsg.key]);
+    } catch (e) {}
+  }
+
+  // مسح الخطوة السابقة فوراً
+  await autoDeletePreviousMessages(jid, session);
+
   if (lastIncomingMsg && lastIncomingMsg.key && !keepForever) {
     session.userMsgs = session.userMsgs || [];
     session.userMsgs.push(lastIncomingMsg);
   }
 
-  // مسح الرسائل التمهيدية السابقة قبل إرسال الخطوة الجديدة
-  await autoDeletePreviousMessages(jid, session);
-
   if (!items || items.length === 0) {
     const sent = await sock.sendMessage(jid, { text });
     if (sent && sent.key && !keepForever) {
       session.botMsgKeys.push(sent.key);
-    }
-    if (lastIncomingMsg && !keepForever) {
-      await silenceChatOnDoctorPhone(jid, lastIncomingMsg);
+      scheduleOneMinuteAutoDelete(jid, sent.key, lastIncomingMsg);
     }
     return;
   }
 
-  // تجهيز الأزرار: إذا كانت 3 خيارات أو أقل وعناوينها قصيرة نستخدم أزرار مباشرة، وإلا نستخدم قائمة منسدلة كاملة واضحة
   const allShort = items.length <= 3 && items.every(it => (it.title || '').length <= 30 && !it.desc);
 
   let buttons = [];
@@ -250,7 +291,7 @@ async function sendSmartInteractive(jid, text, items = [], listButtonTitle = '�
               rows: items.map(it => ({
                 header: '',
                 title: it.title,
-                description: it.desc || '', // وصف مستقل تماماً بدون تكرار العنوان
+                description: it.desc || '',
                 id: it.id
               }))
             }
@@ -318,34 +359,18 @@ async function sendSmartInteractive(jid, text, items = [], listButtonTitle = '�
 
     if (!keepForever && interactiveMsg.key) {
       session.botMsgKeys.push(interactiveMsg.key);
+      scheduleOneMinuteAutoDelete(jid, interactiveMsg.key, lastIncomingMsg);
     }
   } catch (err) {
     console.error('Fallback send error:', err.message);
     const sentFallback = await sock.sendMessage(jid, { text });
     if (sentFallback && sentFallback.key && !keepForever) {
       session.botMsgKeys.push(sentFallback.key);
+      scheduleOneMinuteAutoDelete(jid, sentFallback.key, lastIncomingMsg);
     }
-  }
-
-  if (lastIncomingMsg && !keepForever) {
-    await silenceChatOnDoctorPhone(jid, lastIncomingMsg);
   }
 }
 
-async function silenceChatOnDoctorPhone(jid, lastMsg) {
-  try {
-    if (lastMsg && lastMsg.key) {
-      await sock.readMessages([lastMsg.key]);
-    }
-    if (jid !== DOCTOR_JID && lastMsg) {
-      await sock.chatModify({ archive: true, lastMessages: [lastMsg] }, jid);
-    }
-  } catch (e) {}
-}
-
-/**
- * القائمة الرئيسية مع ترحيب ذكي باسم المريض على الواتساب
- */
 async function sendWelcomeMenu(jid, lastMsg = null, pushName = '') {
   let existing = userSessions.get(jid);
   if (existing) {
@@ -489,15 +514,27 @@ async function handlePatientInput(jid, rawIdOrText, lastMsg = null, pushName = '
     session.pushName = pushName;
   }
 
-  // 1. فحص فوري: إذا ضغط المريض على "القائمة الرئيسية" أو "إلغاء الحجز" في أي وقت وفي أي خطوة، يعود فوراً للقائمة الرئيسية!
+  // 1. فحص فوري شامل: إذا ضغط على "العودة للبوت الذكي" أو "القائمة الرئيسية" أو "متابعة مع المساعد الذكي" أو كتب "بوت" أو "0" في أي وقت (حتى لو كان في وضع المحادثة المباشرة!)
+  if (
+    input === 'CMD_SHOW_FULL_MENU' ||
+    input.includes('متابعة مع المساعد الذكي') ||
+    input.includes('المساعد الذكي')
+  ) {
+    await showFullMainMenu(jid, lastMsg);
+    return;
+  }
+
   if (
     input === 'CMD_MAIN_MENU' ||
     input === '0' ||
+    input.includes('العودة للبوت') ||
+    input.includes('عودة للبوت') ||
+    input.includes('بوت') ||
     input.includes('القائمة الرئيسية') ||
-    input.includes('إلغاء الحجز') ||
-    input.includes('الغاء الحجز')
+    input.includes('إلغاء') ||
+    input.includes('الغاء')
   ) {
-    await sendWelcomeMenu(jid, lastMsg, pushName || session?.pushName);
+    await showFullMainMenu(jid, lastMsg);
     return;
   }
 
@@ -527,11 +564,11 @@ async function handlePatientInput(jid, rawIdOrText, lastMsg = null, pushName = '
     session.mode = 'HUMAN_CHAT';
     await sendSmartInteractive(
       jid,
-      `👨‍⚕️ *تم تحويلك للمحادثة المباشرة مع د. أحمد سلامة وطاقم عيادة سلامتك*\n\nاتفضل اكتب استفسارك أو رسالتك هنا في الشات بالتفصيل، وهيتم الرد عليك في أقرب وقت خلال ساعات العمل (من 3 عصراً حتى 10 مساءً ما عدا الجمعة).\n\n💡 *(لو حبيت ترجع للبوت التفاعلي السريع في أي وقت، اكتب بس كلمة "بوت" أو "0")*.`,
-      [{ id: 'CMD_MAIN_MENU', title: '🤖 العودة للبوت الذكي' }],
+      `👨‍⚕️ *تم تحويلك للمحادثة المباشرة مع د. أحمد سلامة وطاقم عيادة سلامتك*\n\nاتفضل اكتب استفسارك أو رسالتك هنا في الشات بالتفصيل، وهيتم الرد عليك مباشرة.\n\n💡 *(لو حبيت ترجع للبوت الذكي في أي وقت، اضغط الزر بالأسفل أو اكتب كلمة "بوت")*.`,
+      [{ id: 'CMD_SHOW_FULL_MENU', title: '🤖 العودة للبوت الذكي' }],
       'اختر',
       lastMsg,
-      true // تبقى مسجلة
+      false // تتمسح أيضاً بعد دقيقة ليبقى الشات نظيفاً تماماً
     );
 
     // إلغاء أرشفة المحادثة وإرسال إشعار تنبيه للدكتور
@@ -1297,13 +1334,15 @@ async function startWhatsAppBot() {
         innerMsg.templateButtonReplyMessage?.selectedId ||
         '';
 
-      // التقاط الـ ID الدقيق للزر أو السطر الذي ضغط عليه المريض
+      // التقاط الـ ID الدقيق والنص الظاهر للزر أو السطر الذي ضغط عليه المريض (يدعم كل إصدارات واتساب)
       const interactiveResp = innerMsg.interactiveResponseMessage;
       if (!textOrId && interactiveResp) {
         try {
           const params = JSON.parse(interactiveResp.nativeFlowResponseMessage?.paramsJson || '{}');
-          textOrId = params.id || params.title || '';
-        } catch (e) {}
+          textOrId = params.id || params.title || params.display_text || interactiveResp.body?.text || '';
+        } catch (e) {
+          textOrId = interactiveResp.body?.text || '';
+        }
       }
 
       if (textOrId) {
